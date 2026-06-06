@@ -8,6 +8,7 @@ authors = ["Noa Resare"]
 description = """
 A PAM module that authenticates using the ssh-agent.
 """
+rust-version = "1.88.0"
 
 [lib]
 name = "pam_ssh_agent"
