@@ -1,3 +1,9 @@
+pam-ssh-agent (0.9.6-1~noble) noble; urgency=medium
+
+  * Updated dependencies and rust version
+
+ -- Noa Resare <noa@resare.com>  Sun,  7 Jun 2026 09:03:08 +0000
+
 pam-ssh-agent (0.9.5-1~noble) noble; urgency=medium
 
   * Ensure log init only happens once
