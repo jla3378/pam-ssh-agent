@@ -88,6 +88,7 @@ be used. A certificate is considered valid if the following conditions are met:
 * The current time is within the validity period
 * The certificate signature is valid and was made by a trusted certificate key
 * The username provided to the plugin by the PAM_USER item is in the certificate's list of principals
+* The certificate type is specified to "User"
 
 > [!NOTE]
 > Please note that as of now certificates need to have an expiry time. Once the fix to
