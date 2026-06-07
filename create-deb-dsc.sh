@@ -11,6 +11,6 @@ cargo vendor-filterer --platform "*-unknown-linux-gnu"
 tar cfJ ../pam-ssh-agent_${VERSION}.orig-vendor.tar.xz vendor
 
 tar cfJ ../pam-ssh-agent_${VERSION}.orig.tar.xz src examples tests \
- .github LICENSE* README* create-deb-dsc.sh rust-toolchain.toml Cargo*
+ .github LICENSE* *.md create-deb-dsc.sh rust-toolchain.toml Cargo*
 
 debuild -S -sa
