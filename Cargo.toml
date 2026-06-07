@@ -8,7 +8,8 @@ authors = ["Noa Resare"]
 description = """
 A PAM module that authenticates using the ssh-agent.
 """
-rust-version = "1.88.0"
+# this is the minimum required rust version, as identified by `cargo msrv`
+rust-version = "1.85.1"
 
 [lib]
 name = "pam_ssh_agent"
@@ -20,7 +21,7 @@ getrandom = "0.3"
 ssh-key = { version = "0.6", features = ["crypto"] }
 signature = "2.2"
 anyhow = "1.0"
-pam-bindings = "0.1"
+pam-bindings = "0.3"
 # Keep this on 6.x until https://bugzilla.redhat.com/show_bug.cgi?id=2300127 is resolved
 syslog = "6.1"
 uzers = { version = "0.12", default-features = false }
