@@ -1,0 +1,70 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+A Linux/Unix PAM authentication module (Rust) that proves a user's identity by having a (possibly remote, agent-forwarded) `ssh-agent` sign a random challenge with a private key whose public key is trusted by this module. It is a clean-room re-implementation of `pam_ssh_agent_auth` and also supports SSH certificates. It compiles to a C-ABI shared library (`libpam_ssh_agent.so`) loaded by PAM. See `README.md` for end-user configuration, PAM options, variable expansions, and the `sshd`/`SSH_AUTH_INFO_0` special case.
+
+This is **security-sensitive software**: a bug can grant undue privilege escalation. The overriding design goals are robustness and reviewability — prefer clear, auditable code and lean on vetted upstream crates (`ssh-key`, `ssh-agent-client-rs`, `pam-bindings`) rather than hand-rolling crypto or protocol logic.
+
+## Commands
+
+There is **no Makefile** despite `README.md` mentioning `make check`. Run the checks individually — these mirror CI (`.github/workflows/rust.yml`):
+
+```sh
+cargo fmt --check        # formatting (CI fails on diffs)
+cargo build              # default build (pure-Rust crypto)
+cargo test               # unit + integration tests
+cargo clippy --no-deps   # lint
+
+# Release artifact (the PAM module): target/release/libpam_ssh_agent.so
+cargo build --release
+```
+
+Crypto-backend variants (CI runs the test suite for both):
+
+```sh
+cargo test --no-default-features                          # pure-Rust crypto (ssh-key)
+cargo test --no-default-features --features native-crypto # OpenSSL backend; needs libssl-dev + libpam0g-dev
+```
+
+Running specific tests / examples:
+
+```sh
+cargo test test_roundtrip          # a single test by name
+cargo test --test sk_not_present   # one integration test file (tests/*.rs)
+cargo test -- --ignored            # #[ignore]d tests that require root (e.g. uid-drop in cmd.rs)
+
+# Smoke-test against a real running ssh-agent (SSH_AUTH_SOCK must be set):
+cargo run --example authenticator -- tests/data/authorized_keys
+cargo run --example testdata -- <pubkey>   # generates signature test vectors
+```
+
+Requires Rust 1.85+ (edition 2024; the Debian packaging pins 1.85).
+
+## Architecture
+
+**PAM entry → authentication flow.** `src/lib.rs` registers the module via `pam::pam_hooks!`. `sm_authenticate` is the real entry point; it delegates to `run()` → `do_authenticate()`, which: resolves the agent socket (`SSH_AUTH_SOCK` or the `default_ssh_auth_sock` arg), builds an `IdentityFilter`, checks the `sshd` special case, then calls `authenticate()`. Every error is logged and collapsed to `PAM_AUTH_ERR`; only the happy path returns `PAM_SUCCESS`. `sm_setcred` is a deliberate no-op that returns success (required so `doas` doesn't error).
+
+**Challenge-response core** (`src/auth.rs::authenticate`). Lists identities the agent holds, keeps only those the filter trusts, and for each: if it's a certificate, runs `validate_cert` (validity window, signature by a trusted CA fingerprint, requesting principal present, no unknown critical options); then signs a fresh 32-byte random challenge and verifies the signature locally. A `RemoteFailure` from the agent (e.g. a hardware/`sk` key that is configured but not currently plugged in) is **not** fatal — it moves on to the next key. This "try next key" behavior is exactly what `tests/sk_not_present.rs` exercises; preserve it.
+
+**Trust configuration** (`src/filter.rs::IdentityFilter`). Holds two `HashSet<KeyData>`: plain authorized keys and `cert-authority` keys. Sources, in combination: the `file=` authorized_keys file, a `ca_keys_file=` (raw CA keys, no prefix, OpenSSH `TrustedUserCAKeys`-style), and/or an `authorized_keys_command=` whose stdout is parsed as authorized_keys. The `cert-authority` option prefix in an authorized_keys line routes a key into the CA set.
+
+**Crypto backend dispatch** (`src/verify.rs`). `verify()` is backend-agnostic; conditional `use` statements at the top of the file pick the implementation at compile time: default uses `ssh-key`'s pure-Rust `signature::Verifier`; the `native-crypto` feature instead routes to `src/nativecrypto.rs`, which reimplements verification over OpenSSL (for environments mandating FIPS-validated crypto). When touching verification, keep both paths behaving identically — `src/verify.rs`'s tests run under both features.
+
+**Testability via trait seams.** External, hard-to-test dependencies are abstracted behind small traits so tests can inject fakes:
+- `SSHAgent` (`src/agent.rs`) wraps `ssh_agent_client_rs::Client` (`list_identities`, `sign`).
+- `Environment` (`src/environment.rs`) wraps OS lookups (homedir, hostname, fqdn, uid, env vars); `UnixEnvironment` is the real impl.
+- `PamHandleExt` (`src/pamext.rs`) adds `get_calling_user` (PAM_USER) and `get_service` (PAM_SERVICE) to `PamHandle`.
+
+`src/test.rs` (gated `#[cfg(test)]`) provides the fakes — `CannedEnv`/`CannedHandler` (queue of canned answers), `DummyEnv`/`DummyHandle` (panic if called) — and the `data!` macro for test-data paths. New testable logic should follow this pattern: take a trait, not the concrete type.
+
+**Supporting modules.** `src/args.rs` parses space-separated PAM `key=value` options. `src/expansions.rs` handles the `~`/`%h`/`%H`/`%f`/`%u`/`%U` substitutions applied to option values. `src/cmd.rs` runs external commands with a 10s timeout and optional uid-drop (used by `authorized_keys_command_user`). `src/logging.rs` sends `log` macros to the `AUTHPRIV` syslog facility with a `pam_ssh_agent(<service>:auth):` prefix matching the original module; init is idempotent (guarded by a mutex).
+
+## Conventions & gotchas
+
+- **Tests resolve paths two different ways.** Compile-time paths via the `data!` macro / `include_str!` resolve from `$CARGO_MANIFEST_DIR/tests/data/`, but runtime file paths in integration tests are written relative to the repo root (e.g. `"tests/data/authorized_keys"`), so `cargo test` must be run from the project root. Regenerate test keys/certs per the recipe in `tests/data/README.md`.
+- **Certificates currently must have an expiry** (upstream `ssh-key` bug); see the note in `README.md`. Don't assume non-expiring certs work yet.
+- **Home-directory (`~`/`%h`) expansion is intentionally unsafe** and documented as such — do not extend or "improve" it toward making attacker-controlled key files easier to use.
+- A couple of dependencies are deliberately pinned to older majors (`syslog` 6.x, `hostname` 0.3.x) with comments in `Cargo.toml` citing distro-packaging bugs — don't bump them without checking those.
