@@ -23,11 +23,11 @@ pub fn authenticate(
 ) -> Result<bool> {
     for identity in agent.list_identities()? {
         if filter.filter(&identity) {
-            if let Certificate(cert) = &identity {
-                if !validate_cert(cert, SystemTime::now(), principal) {
-                    info!("Cert not valid, skipping");
-                    continue;
-                }
+            if let Certificate(cert) = &identity
+                && !validate_cert(cert, SystemTime::now(), principal)
+            {
+                info!("Cert not valid, skipping");
+                continue;
             }
             // Allow sign_and_verify() to return RemoteFailure (key not loaded / present),
             // and try the next configured key
