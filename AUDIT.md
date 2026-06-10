@@ -88,3 +88,58 @@ duplicated here.
 1. Install per `README.md` → "Building and installing on macOS".
 2. Wire into a test `/etc/pam.d` service (e.g. `sudo_local`) and authenticate via an agent such
    as Secretive (`SSH_AUTH_SOCK`).
+
+## macOS-only conversion (v0.10.0)
+
+The sections above audited v0.9.7 as a still-cross-platform crate. v0.10.0 commits to **macOS
+arm64e only**, which supersedes several of the notes above (notably the "PAM result-code
+numbering" caveat under *Notes* and the dual-backend rows in *Environment & verification*).
+
+### `build.rs` — confirmed unnecessary, stays removed
+As established in "Headline result" above, `cargo build` links cleanly with **no build script**:
+`pam-bindings` declares `#[link(name = "pam")]`, so `pam_get_item` and friends resolve at link
+time against `/usr/lib/libpam.2.dylib`. `build.rs` remains deleted.
+
+### In-repo OpenPAM FFI (`src/openpam.rs`) — and why
+macOS uses **OpenPAM**, not Linux-PAM, and the two **number their result codes differently**.
+The dependency on the `pam-bindings` crate (whose constants follow Linux-PAM) was replaced by
+this fork's own thin FFI in `src/openpam.rs`, with constants taken from the macOS SDK
+**`security/pam_constants.h`** as the source of truth. The concrete hazard this closes:
+`PAM_AUTH_ERR` is **9 on OpenPAM** but **7 on Linux-PAM** — only `PAM_SUCCESS == 0` agrees across
+both. Under the old "everything non-zero is a failure to PAM" reasoning this happened to be
+fail-safe, but returning a value labelled `PAM_AUTH_ERR` that was actually some *other* OpenPAM
+code was wrong on its face and not reviewable; the in-repo bindings make the numbers correct by
+construction. The module exports exactly two entry points, `pam_sm_authenticate` and
+`pam_sm_setcred`, and both wrap their bodies in `catch_unwind` so a Rust panic can never unwind
+across the FFI boundary into the C PAM host.
+
+### Removed: native-crypto/OpenSSL backend
+The optional `native-crypto` feature (and `src/nativecrypto.rs`) existed only to satisfy
+FIPS-mandated Linux distros via OpenSSL. It is gone; crypto is **pure-Rust `ssh-key` only**.
+This retires FIX/parity item "Crypto-backend parity (`src/verify.rs` ↔ `src/nativecrypto.rs`)"
+and the `--features native-crypto` test row above — there is now a single verification path.
+
+### Removed: all Linux packaging
+`debian/`, `create-deb-dsc.sh`, `RELEASE.md`, and `rust-toolchain.toml` were deleted. macOS
+builds/installs are driven by the new `Makefile` (`make check` / `make pam` / `make install` /
+`make clean`).
+
+### `authorized_keys_command` privilege-drop gid fix
+The uid/gid dropped to when running an `authorized_keys_command` under
+`authorized_keys_command_user` was the Linux overflow gid **65534**. On macOS the
+least-privilege account is **`nobody`**, whose gid is **`(gid_t)-2` = 4294967294**; the code now
+drops to that value. (65534 is not the unprivileged account on macOS.)
+
+### Shippable artifact: thin arm64e dylib (nightly + build-std)
+The product is a **thin arm64e Mach-O dylib**, shipped as `pam_ssh_agent.so`.
+`arm64e-apple-darwin` is a **tier-3** Rust target with no prebuilt `std`, so it must be built
+with a **nightly** toolchain and **`-Z build-std=std`**:
+
+```sh
+rustup run nightly cargo build -Z build-std=std --release --target arm64e-apple-darwin
+# -> target/arm64e-apple-darwin/release/libpam_ssh_agent.dylib  (== `make pam`)
+```
+
+Gotcha: third-party arm64e **executables** can't run under Apple's preview-ABI rules, so the
+unit/integration tests (`make check`) run on the **host arch**; only the shipped dylib is
+arm64e. The crypto and PAM logic is architecture-independent, so host-arch testing is sound.

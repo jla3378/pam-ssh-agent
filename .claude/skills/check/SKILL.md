@@ -1,22 +1,23 @@
 ---
 name: check
-description: Run the full local CI gate for pam-ssh-agent — formatting, build, tests under both crypto backends, and clippy. Use before pushing or opening a PR. Mirrors .github/workflows/rust.yml. There is no `make check` target despite the README; this is the replacement.
+description: Run the full local CI gate for pam-ssh-agent — formatting, build, tests, and clippy on the host toolchain/arch. Use before pushing or opening a PR. Equivalent to `make check`; building the shipped arm64e module is a separate step (`make pam`).
 disable-model-invocation: true
 ---
 
 # check
 
-Run the same checks CI runs (`.github/workflows/rust.yml`), in order, from the repo root.
+Run the host-arch correctness gate, in order, from the repo root. The crypto and PAM logic
+is architecture-independent, so these run on the host toolchain (no arm64e cross-build needed).
 Run them all (don't stop at the first failure), then print a short summary table of each
 step's result. For any failure, show the relevant failing output.
 
 1. **Formatting** — `cargo fmt --check`
 2. **Build** — `cargo build --verbose`
-3. **Tests (pure-Rust crypto)** — `cargo test --no-default-features`
-4. **Tests (OpenSSL / native-crypto)** — `cargo test --no-default-features --features native-crypto`
-   - Needs `libssl-dev` + `libpam0g-dev` on Linux; on macOS OpenSSL must be discoverable
-     (Homebrew `openssl@3`, e.g. via `OPENSSL_DIR`). If this step can't build because OpenSSL
-     isn't found, report that distinctly — it's an environment gap, not a code failure.
-5. **Lint** — `cargo clippy --no-deps`
+3. **Tests** — `cargo test`
+4. **Lint** — `cargo clippy --no-deps`
+
+`make check` runs steps 1, 3, and 4 as a shorthand. Note this gate does **not** produce the
+shippable artifact: the thin arm64e dylib (`pam_ssh_agent.so`) is built separately with
+`make pam` (a nightly `-Z build-std` cross-build for `arm64e-apple-darwin`).
 
 Summary table columns: step, command, result (✅/❌/⚠️ skipped).

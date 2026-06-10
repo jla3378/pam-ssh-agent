@@ -1,104 +1,125 @@
-# A PAM module for authenticating using ssh-agent
+# A macOS PAM module for authenticating using ssh-agent
 
-This project provides a PAM authentication module determining the identity of a user based on a
-signature request and response sent via the ssh-agent protocol to a potentially remote `ssh-agent`.
+This project provides a PAM authentication module for **macOS** that determines the identity of a user
+based on a signature request and response sent via the ssh-agent protocol to a potentially remote
+`ssh-agent`. macOS uses [OpenPAM](https://www.openpam.org/), and this module ships as a thin
+**arm64e** Mach-O named `pam_ssh_agent.so`.
 
-One scenario that this module can be used in is to grant escalated privileges on a remote system accessed using `ssh`
-with agent forwarding enabled and the `sudo` command. The user proves their identity by signing a challenge using their
-private key, and the signature is verified using a public key made available to the `pam-ssh-agent` module on the
-server. Combined with a setup where the private part of an authentication keypair is stored in custom hardware such as
-a YubiKey, a TPM chip, or the macOS secure enclave, this can provide a high level of security as well as convenience.
-I use the [Secretive](https://github.com/maxgoedjen/secretive) app on macOS for this purpose.
+One scenario that this module can be used in is to grant escalated privileges using the `sudo` command.
+The user proves their identity by signing a challenge using their private key, and the signature is
+verified using a public key made available to the `pam-ssh-agent` module. Combined with a setup where the
+private part of an authentication keypair is stored in custom hardware such as the macOS Secure Enclave,
+a YubiKey, or a TPM chip, this can provide a high level of security as well as convenience. I use the
+[Secretive](https://github.com/maxgoedjen/secretive) app on macOS for this purpose, which exposes a
+Secure Enclave key over an `ssh-agent` socket.
 
-This project is a re-implementation of the [pam_ssh_agent_auth](https://github.com/jbeverly/pam_ssh_agent_auth) module but does not share any code with that project.
-We are pretty close to covering all the features of the original implementation, along with some additional features
-such as authentication using SSH Certificates.
+This project is a re-implementation of the [pam_ssh_agent_auth](https://github.com/jbeverly/pam_ssh_agent_auth)
+module but does not share any code with that project. It covers essentially all of the features of the
+original implementation, along with some additional features such as authentication using SSH Certificates.
 
 ## Project goals
 
-Since this is security sensitive software and a bug could easily result in undue privilege escalation, the main goal of
-this project is to be robust and easy to follow for would-be reviewers.
+Since this is security sensitive software and a bug could easily result in undue privilege escalation, the
+main goal of this project is to be robust and easy to follow for would-be reviewers.
 
-The implementation leans heavily on crates available in the Rust ecosystem that implements the different parts needed
-for the overall functionality, most notably the `pam`, `ssh-key`, and `ssh-agent-client-rs` crates. Using upstream
-libraries directly is intended to make it easier to ensure that implementation issues with security implications gets
-addressed in a timely manner. A secondary benefit is that it is easier to support the full of algorithms that OpenSSH
-supports.
+The implementation leans heavily on crates available in the Rust ecosystem that implement the different
+parts needed for the overall functionality, most notably the `ssh-key` and `ssh-agent-client-rs` crates
+(the PAM FFI bindings live in this crate's own `src/openpam.rs`). All crypto is pure-Rust via `ssh-key`.
+Using upstream libraries directly is intended to make it easier to ensure that implementation issues with
+security implications get addressed in a timely manner. A secondary benefit is that it is easier to support
+the full range of algorithms that OpenSSH supports.
 
-## Installation and packaging
+## Building and installing on macOS
 
-Getting this software packaged and integrated into upstream Linux distributions is an active goal of this project,
-however doing that in a way that conforms to upstream rules and conventions turns out to be a lot of work. If you have
-the ability to contribute feel free to have a look at the following issues:
+The shippable artifact is a **thin arm64e `.dylib`** that is installed under a `.so` name (OpenPAM loads
+Mach-O modules that conventionally carry a `.so` name). Because `arm64e-apple-darwin` is a tier-3 Rust
+target with no prebuilt `std`, building it requires a nightly toolchain plus `-Zbuild-std`. A `Makefile`
+wraps the details:
 
-* Fedora/CentOS/Enterprise Linux packaging: https://github.com/nresare/pam-ssh-agent/issues/24
-* Ubuntu packaging: https://github.com/nresare/pam-ssh-agent/issues/54
-* Arch linux packaging: https://github.com/nresare/pam-ssh-agent/issues/50
+```sh
+make check      # cargo fmt --check, cargo clippy --no-deps, cargo test  (runs on the host arch)
+make pam        # build the arm64e dylib (toolchain overridable via PAM_TOOLCHAIN, default nightly)
+make install    # make pam, then sudo install to /usr/local/lib/pam/pam_ssh_agent.so
+make clean      # cargo clean
+```
 
-While this work is completing, feel free to use https://copr.fedorainfracloud.org/coprs/noa/rust/ that has binary 
-packages for Fedora and Enterprise Linux derived distributions. The configuration that is invoked by the copr
-infrastructure to build those packages is available from https://github.com/nresare/rpm-packaging The latest version is
-also packaged for Ubuntu 24.04 available at https://launchpad.net/~nresare/+archive/ubuntu/ppa where the
-`*_sources.changes` and related tarfiles are constructed using the `create-deb-dsc.sh` script.
+`make pam` runs, in effect:
 
-For other users, it is entirely possible to simply invoke `cargo build --release` and copy the resulting
-`target/release/libpam_ssh_agent.so` to the directory that holds your pam modules. Mine is in 
-`/lib/x86_64-linux-gnu/security`.
+```sh
+rustup run nightly cargo build -Z build-std=std --release --target arm64e-apple-darwin
+# -> target/arm64e-apple-darwin/release/libpam_ssh_agent.dylib
+```
 
-### Building and installing on macOS
+Requires Rust 1.88+ (edition 2024) and a nightly toolchain for the arm64e build. The correctness checks in
+`make check` run on the host toolchain/architecture, since the crypto and PAM logic is
+architecture-independent.
 
-This module also builds and runs on macOS, which uses OpenPAM rather than Linux-PAM. A few
-things differ from Linux:
+### Installing the module
 
-* `cargo build --release` produces a **`.dylib`**, not a `.so`:
-  `target/release/libpam_ssh_agent.dylib`. It links `libpam` directly (via the `pam-bindings`
-  crate's `#[link(name = "pam")]`), so it builds on macOS with no extra linker configuration.
-* Apple's System Integrity Protection makes `/usr/lib/pam` read-only, so install the module
-  elsewhere and refer to it by **absolute path**:
-  ```sh
-  cargo build --release
-  sudo mkdir -p /usr/local/lib/pam
-  sudo cp target/release/libpam_ssh_agent.dylib /usr/local/lib/pam/pam_ssh_agent.so
-  ```
-  (OpenPAM loads Mach-O modules that conventionally carry a `.so` name.)
-* Wire it into a service under `/etc/pam.d`. On recent macOS the clean way to add it to
-  `sudo` is `/etc/pam.d/sudo_local` (copy it from `/etc/pam.d/sudo_local.template`):
-  ```
-  auth  sufficient  /usr/local/lib/pam/pam_ssh_agent.so  file=/etc/security/authorized_keys
-  ```
-* Use an `ssh-agent` that exposes a Secure Enclave key such as
-  [Secretive](https://github.com/maxgoedjen/secretive), and make sure `SSH_AUTH_SOCK` is set
-  in the environment that runs `sudo`.
+macOS System Integrity Protection (SIP) makes `/usr/lib/pam` **read-only even for root**, so install the
+module under `/usr/local/lib/pam` instead and refer to it by **absolute path** in `/etc/pam.d`. `make install`
+does this for you:
 
-> The build and the full test suite (both crypto backends) pass on macOS. Verify the runtime
-> PAM load on your own machine, since PAM integration depends on local configuration.
+```sh
+sudo install -d /usr/local/lib/pam
+sudo install -m 0755 target/arm64e-apple-darwin/release/libpam_ssh_agent.dylib \
+    /usr/local/lib/pam/pam_ssh_agent.so
+```
 
-## Example Usage
+### Wiring it into sudo
 
-* First, install the software using one of the methods above.
-* install `doas`, to ensure that you have a different way of elevating your privileges than sudo.
-  You will need to add a `permit` line in `/etc/doas.conf` for it to work. This is not strictly
-  necessary, but especially if you work on remote machines without console access it is good to
-  have a backup authentication method set up.
-* Replace the `common-auth` include in `/etc/pam.d/sudo` with `auth  required   pam_ssh_agent.so`
-* Configure `sudo` to not drop the `SSH_AUTH_SOCK` environment variable by
-  adding `Defaults env_keep += "SSH_AUTH_SOCK"` to the file `/etc/sudoers.d/ssh_agent_env`
-* Add a public key that your ssh-agent knows about to `/etc/security/authorized_keys`
-* If you are using a linux system based on systemd, you can observe the output of this crate using 
-  `journalctl -f --facility authpriv`
+`/etc/pam.d/sudo` is Apple-managed (read-only and reset on OS updates) and includes `auth include sudo_local`.
+The clean place to add this module is `/etc/pam.d/sudo_local`, which you create by copying
+`/etc/pam.d/sudo_local.template`:
+
+```
+auth  sufficient  /usr/local/lib/pam/pam_ssh_agent.so  file=/etc/security/authorized_keys
+```
+
+`sudo` scrubs the environment, so it will not forward your agent socket unless you tell it to. Add:
+
+```
+Defaults env_keep += "SSH_AUTH_SOCK"
+```
+
+for example in `/etc/sudoers.d/ssh_agent_env`. Then add a public key that your `ssh-agent` knows about to
+`/etc/security/authorized_keys` (that directory already exists on macOS).
+
+> :warning: **Lockout safety.** Misconfiguring sudo's PAM stack can lock you out of privilege escalation,
+> and macOS recovery is painful. While testing: keep a root shell open in a separate window, use the
+> `sufficient` control so that a module failure falls through to the normal password prompt, and try the
+> module against a throwaway service before touching `sudo`.
+
+### Agent and scope notes
+
+* Use an `ssh-agent` that exposes a Secure Enclave key, such as
+  [Secretive](https://github.com/maxgoedjen/secretive), and make sure `SSH_AUTH_SOCK` is set in the
+  environment that runs `sudo`.
+* This module only affects services configured under `/etc/pam.d` (`sudo`, `su`, `login`, `sshd`). Most
+  macOS privilege prompts go through Authorization Services rather than PAM, and GUI auth paths
+  (`authorizationhost`, `securityagent`, the screen saver) have no agent socket available.
+
+### Viewing logs
+
+The module logs to the syslog `AUTHPRIV` facility, which macOS routes into the unified logging system
+(not `/var/log`). Watch it with:
+
+```sh
+log stream --predicate 'eventMessage CONTAINS "pam_ssh_agent"'
+```
 
 ## Using a command to dynamically obtain trusted keys
 
 This plugin can be configured with `authorized_keys_command` which will call an external binary to obtain
-trusted keys for authentication. An example of such a program is [sss_ssh_authorizedkeys](https://manpages.debian.org/testing/sssd-common/sss_ssh_authorizedkeys.1.en.html)
+trusted keys for authentication. An example of such a program is [sss_ssh_authorizedkeys](https://manpages.debian.org/testing/sssd-common/sss_ssh_authorizedkeys.1.en.html).
 
 Since this module is expected to be invoked in a privileged context, some care has been taken to reduce
-the risks involved in invoking external commands with potentially eleveated privilege in the following way:
+the risks involved in invoking external commands with potentially elevated privilege in the following way:
 
-By default, the external command is invoked with the privileges of the calling user. The group id is also set
-to the group with group id `65534`, the default group id of least privilege in the Linux kernel. 
-It is recommended that the last  privileged user is specified using the `authorized_keys_command_user`, 
-for example `nobody`.
+By default, the external command is invoked with the privileges of the calling user. The group id is also
+set to the least-privilege `nobody` group, group id `(gid_t)-2` (i.e. `4294967294`) on macOS. It is
+recommended that the unprivileged user is specified using the `authorized_keys_command_user`, for example
+`nobody`.
 
 ## Configuration options
 
@@ -134,8 +155,8 @@ be used. A certificate is considered valid if the following conditions are met:
 > [!NOTE]
 > Please note that as of now, certificates need to have an expiry time. Once the fix to
 > [this bug](https://github.com/RustCrypto/SSH/issues/174) has made it into a stable release
-> we can relax this requirement but for now just add an expiry time very far into the future to if you 
-> want to emulate a certificat without expiry time.
+> we can relax this requirement but for now just add an expiry time very far into the future if you 
+> want to emulate a certificate without an expiry time.
 
 Just like with OpenSSH there are two ways to specify a certificate authority key. In the same way as the
 authorized_keys format, a certificate authority key can be specified alongside the regular ssh keys by being
@@ -159,7 +180,7 @@ upgrade path from `pam_ssh_agent_auth` smoother as the previous functionality is
 
 * `~` same as in shells, without specifying a username this expands to the home directory referred to by `PAM_USER`, 
   normally the user attempting to authenticate. If a username is specified, the home directory of that user will be
-  used such that `~alice` might expand to `/home/alice`.
+  used such that `~alice` might expand to `/Users/alice`.
 * `%h` same as `~`, the home directory of the user referred to by the PAM item `PAM_USER`.
 * `%H` the value returned by `gethostname(3)`, truncated after the first period such that if `gethostname(3)` returns
   `host.example.com` this `%H` will turn into `host`.
@@ -169,29 +190,30 @@ upgrade path from `pam_ssh_agent_auth` smoother as the previous functionality is
 * `%u` the username of the user attempting to authenticate.
 * `%U` numeric uid of the user attempting to authenticate.
 
+> [!NOTE]
+> On macOS the value returned by `gethostname(3)` (used by `%H` and `%f`) changes as the machine moves
+> between networks and as Bonjour adjusts the local hostname, so key paths templated with `%H`/`%f` can be
+> unstable. Prefer a fixed path or a configuration-management-managed file if you need stability.
+
 ## Special behaviour when called by sshd
 
-Another feature inherited by `pam_ssh_agent_client` is that when calling `pam_get_item(3)` with the `PAM_SERVICE`
-argument returns the string `sshd` special logic is triggered: If the environment variable `SSH_AUTH_INFO_0` is set and
-contains a public key and that public key matches any of the configured public keys, this plugin invocation returns 
-`PAM_SUCCESS`. The environment variable is set by `sshd` to contain the public key that was used by its pubkey
-authentication method.
+Another feature inherited from `pam_ssh_agent_auth` is that when calling `pam_get_item(3)` with the `PAM_SERVICE`
+argument returns the string `sshd`, special logic is triggered: If the environment variable `SSH_AUTH_INFO_0` is set
+and contains a public key and that public key matches any of the configured public keys, this plugin invocation
+returns `PAM_SUCCESS`. The environment variable is set by `sshd` to contain the public key that was used by its
+pubkey authentication method. This requires `ExposeAuthInfo yes` in `sshd_config`.
 
 This allows for `sshd` to be configured with this module as a `sufficient` authentication mechanism along with
 other mechanisms such as for example a time based one-time-password. If the key used in `sshd`'s initial authentication
 is in the list of higher security keys that this plugin is configured with, no additional authentication is required. 
 However, if the key is not in the list a secondary authentication method can be configured.
 
-## The `native-crypto` feature
+## Set up a fallback authentication method
 
-In a [discussion](https://github.com/nresare/pam-ssh-agent/issues/24) about the possibility of having this piece of
-software be integrated into commercial upstream distributions, it was mentioned that such distributions might have
-a requirement that all crypto operations happens with FIPS validated software. Since the native rust crypto
-implementation that this software was using is not yet FIPS validated, but OpenSSL can be made to be, I decided
-to implement the option to use OpenSSL instead of the ssh-key crypto implementation using the `native-crypto` feature.
-
-Unless you are someone that has a mandate to only run FIPS validated crypto implementations, you probably don't want
-this feature enabled.
+Because a PAM misconfiguration can prevent you from elevating privileges, it is wise to keep a working
+fallback while you set this up. Using the `sufficient` control (as in the `sudo_local` example above) means
+that if this module fails, PAM falls through to the normal password prompt rather than denying access. Keep
+a root shell open while testing so you can revert `/etc/pam.d` changes if anything goes wrong.
 
 ## License
 
@@ -200,9 +222,8 @@ Licensed under either of the [Apache License, Version 2.0](http://www.apache.org
 
 ## How to contribute
 
-Just open a pull request against https://github.com/nresare/pam-ssh-agent. I have a github action
-that runs the test, `cargo fmt` and `cargo clippy` against diffs (as soon as I get around to trigger them)
-so it would be nice if you ran `make check` first locally to save a round-trip or two.
+Open a pull request. There is a github action that runs the tests, `cargo fmt`, and `cargo clippy` against
+diffs, so it would be nice if you ran `make check` first locally to save a round-trip or two.
 
 ### Contribution licensing
 

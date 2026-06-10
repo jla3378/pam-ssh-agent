@@ -6,9 +6,10 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
-// RedHat and Debian derived distributions have different names for the least privilege group,
-// but the numeric value seems to be the same, derived from /proc/sys/fs/overflowgid
-const DEFAULT_LOW_PRIVILEGE_GID: u32 = 65534;
+// macOS's least-privilege account is `nobody`, whose uid and gid are both (gid_t)-2, i.e.
+// 4294967294. (This differs from Linux, where the overflow gid 65534 is `nobody`/`nogroup`;
+// on macOS gid 65534 maps to no group at all, so dropping to it would be a misconfiguration.)
+const DEFAULT_LOW_PRIVILEGE_GID: u32 = 4294967294;
 
 /// Invoke the specified command. If the command does not finish after the specified
 /// timeout duration, Err is returned, else the content of stdout from the command is
