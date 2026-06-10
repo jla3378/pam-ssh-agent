@@ -43,11 +43,13 @@ make install    # make pam, then sudo install to /usr/local/lib/pam/pam_ssh_agen
 make clean      # cargo clean
 ```
 
-`make pam` runs, in effect:
+`make pam` runs the build below, but pins nightly's `rustc` explicitly (via `rustup which`).
+That matters when a Homebrew `rust` install is also present: its stable `rustc` can shadow
+rustup's in `PATH`, and a bare `rustup run` then feeds `-Z` to stable `rustc`, which rejects it.
 
 ```sh
 rustup run nightly cargo build -Z build-std=std --release --target arm64e-apple-darwin
-# -> target/arm64e-apple-darwin/release/libpam_ssh_agent.dylib
+# -> target/arm64e-apple-darwin/release/libpam_ssh_agent.dylib  (thin arm64e, ad-hoc signed)
 ```
 
 Requires Rust 1.88+ (edition 2024) and a nightly toolchain for the arm64e build. The correctness checks in

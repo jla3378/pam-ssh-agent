@@ -25,8 +25,13 @@ check:
 	cargo clippy --no-deps
 	cargo test
 
+# Homebrew's stable rustc/cargo shadow rustup's in PATH, so a bare `rustup run` ends up
+# invoking the stable rustc (which rejects -Z). Pin both cargo and rustc to the nightly
+# toolchain explicitly.
 pam:
-	rustup run $(PAM_TOOLCHAIN) cargo build -Z build-std=std --release --target $(TARGET)
+	RUSTC="$$(rustup which --toolchain $(PAM_TOOLCHAIN) rustc)" \
+		"$$(rustup which --toolchain $(PAM_TOOLCHAIN) cargo)" \
+		build -Z build-std=std --release --target $(TARGET)
 	@echo "Built $(DYLIB)"
 
 install: pam

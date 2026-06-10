@@ -31,8 +31,10 @@ make clean    # cargo clean
 The **shippable** artifact is a thin **arm64e** dylib. `arm64e-apple-darwin` is a tier-3 Rust target with no prebuilt `std`, so it needs a **nightly** toolchain plus `-Zbuild-std`:
 
 ```sh
-rustup run nightly cargo build -Z build-std=std --release --target arm64e-apple-darwin
-# -> target/arm64e-apple-darwin/release/libpam_ssh_agent.dylib
+make pam   # pins nightly's rustc via `rustup which` (Homebrew's stable rustc otherwise
+           # shadows it in PATH and gets fed -Z, which only nightly accepts)
+# in effect: rustup run nightly cargo build -Z build-std=std --release --target arm64e-apple-darwin
+# -> target/arm64e-apple-darwin/release/libpam_ssh_agent.dylib  (thin arm64e, ad-hoc signed)
 ```
 
 **Gotcha:** third-party arm64e *executables* cannot run under Apple's preview-ABI gate, so `cargo test` (test binaries) runs on the **host** arch — only the shipped dylib is arm64e.
