@@ -1,31 +1,23 @@
-use anyhow::{Result, anyhow};
-use pam::items::{Service, User};
-use pam::module::PamHandle;
-use std::str::from_utf8;
+use crate::openpam::PamHandle;
+use anyhow::Result;
 
-/// This extension trait adds some extra methods to PamHandle
+/// Extension trait over the PAM handle providing the two items this module needs.
+/// It is a trait so tests can inject fakes (see `CannedHandler`/`DummyHandle` in
+/// `src/test.rs`) instead of a real `PamHandle`.
 pub trait PamHandleExt {
-    /// Fetch the PAM_USER value.
+    /// Fetch the authenticating user (PAM_USER).
     fn get_calling_user(&self) -> Result<String>;
 
-    /// Fetch the name of the current service, i.e. the software that uses pam for authentication
-    /// using the PamHandle::get_item() method.
+    /// Fetch the calling service name (PAM_SERVICE), i.e. the program using PAM.
     fn get_service(&self) -> Result<String>;
 }
 
-macro_rules! get_item {
-    ($name:ident, $type:ty) => {
-        fn $name(&self) -> Result<String> {
-            let service = self
-                .get_item::<$type>()
-                .unwrap()
-                .ok_or(anyhow!("Could not get_item {}", stringify!($type)))?;
-            Ok(from_utf8(service.0.to_bytes())?.to_string())
-        }
-    };
-}
-
 impl PamHandleExt for PamHandle {
-    get_item!(get_calling_user, User);
-    get_item!(get_service, Service);
+    fn get_calling_user(&self) -> Result<String> {
+        self.user()
+    }
+
+    fn get_service(&self) -> Result<String> {
+        self.service()
+    }
 }

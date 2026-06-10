@@ -21,7 +21,6 @@ ssh-key = { version = "0.6", features = ["crypto"] }
 # this version needs to match the version brought in by ssh-key
 signature = "2.2"
 anyhow = "1.0"
-pam-bindings = "0.3"
 syslog = "6.1"
 uzers = { version = "0.12", default-features = false }
 hostname = { version = "0.4", default-features = false }

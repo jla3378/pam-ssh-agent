@@ -10,6 +10,7 @@ mod environment;
 mod expansions;
 pub mod filter;
 mod logging;
+mod openpam;
 mod pamext;
 #[cfg(test)]
 mod test;
@@ -18,8 +19,7 @@ mod verify;
 pub use crate::agent::SSHAgent;
 pub use crate::auth::authenticate;
 use crate::auth::validate_cert;
-use pam::constants::{PamFlag, PamResultCode};
-use pam::module::{PamHandle, PamHooks};
+use crate::openpam::{PAM_AUTH_ERR, PAM_SUCCESS, PamHandle};
 use std::env;
 use std::env::VarError;
 
@@ -32,52 +32,88 @@ use args::Args;
 use log::{debug, error, info};
 use ssh_agent_client_rs::{Client, Identity};
 use ssh_key::{Certificate, PublicKey};
-use std::ffi::CStr;
+use std::ffi::{CStr, c_char, c_int};
 use std::path::Path;
 use std::time::SystemTime;
 
-struct PamSshAgent;
-pam::pam_hooks!(PamSshAgent);
-
-impl PamHooks for PamSshAgent {
-    /// The authentication method called by pam to authenticate the user. This method
-    /// will return PAM_SUCCESS if the ssh-agent available through the unix socket path
-    /// in the PAM_AUTH_SOCK environment variable is able to correctly sign a random
-    /// message with the private key corresponding to one of the public keys made available
-    /// through the args. Otherwise, this function returns PAM_AUTH_ERR.
-    /// For the specifics of how the arguments are used to obtain ssh keys
-    /// and certificate authority keys, please refer to README.md
-    ///
-    /// This method logs diagnostic output to the AUTHPRIV syslog facility.
-    fn sm_authenticate(
-        pam_handle: &mut PamHandle,
-        args: Vec<&CStr>,
-        _flags: PamFlag,
-    ) -> PamResultCode {
-        match run(args, pam_handle) {
-            Ok(_) => {
-                debug!("Successful call to sm_authenticate(), returning PAM_SUCCESS");
-                PamResultCode::PAM_SUCCESS
+/// PAM authentication entry point (called by libpam). Returns `PAM_SUCCESS` if the
+/// ssh-agent reachable through `SSH_AUTH_SOCK` signs a random challenge with a private key
+/// whose public key is trusted by this module's configuration, otherwise `PAM_AUTH_ERR`.
+/// See README.md for how the arguments select authorized keys and CA keys. Diagnostics go
+/// to the AUTHPRIV syslog facility.
+///
+/// # Safety
+/// libpam calls this with a valid `pamh` and an `argv` of `argc` NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pam_sm_authenticate(
+    pamh: *mut PamHandle,
+    _flags: c_int,
+    argc: c_int,
+    argv: *const *const c_char,
+) -> c_int {
+    // A Rust panic must never unwind across the C boundary into the PAM host (UB).
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: libpam passes a valid handle; null is defended against regardless.
+        let Some(handle) = (unsafe { pamh.as_ref() }) else {
+            error!("pam_sm_authenticate called with a null PAM handle");
+            return PAM_AUTH_ERR;
+        };
+        // SAFETY: argv holds argc entries per the C contract; collect_args bounds-checks.
+        let args = unsafe { collect_args(argc, argv) };
+        match run(args, handle) {
+            Ok(()) => {
+                debug!("Successful call to pam_sm_authenticate(), returning PAM_SUCCESS");
+                PAM_SUCCESS
             }
             Err(err) => {
                 for line in format!("{err:?}").split('\n') {
-                    error!("{line}")
+                    error!("{line}");
                 }
-                debug!("Failed call to sm_authenticate(), returning PAM_AUTH_ERR");
-                PamResultCode::PAM_AUTH_ERR
+                debug!("Failed call to pam_sm_authenticate(), returning PAM_AUTH_ERR");
+                PAM_AUTH_ERR
             }
         }
-    }
+    }))
+    .unwrap_or(PAM_AUTH_ERR)
+}
 
-    // `doas` calls pam_setcred(), if this is not defined to succeed, it prints
-    // a fabulous `doas: pam_setcred(?, PAM_REINITIALIZE_CRED): Permission denied: Unknown error -3`
-    fn sm_setcred(
-        _pam_handle: &mut PamHandle,
-        _args: Vec<&CStr>,
-        _flags: PamFlag,
-    ) -> PamResultCode {
-        PamResultCode::PAM_SUCCESS
+/// `doas`/`sudo` call `pam_setcred()`; it must succeed or they error out. This module has
+/// no credentials to (re)establish, so it is a deliberate no-op.
+#[unsafe(no_mangle)]
+pub extern "C" fn pam_sm_setcred(
+    _pamh: *mut PamHandle,
+    _flags: c_int,
+    _argc: c_int,
+    _argv: *const *const c_char,
+) -> c_int {
+    PAM_SUCCESS
+}
+
+/// Convert libpam's `(argc, argv)` into borrowed `CStr`s, skipping null entries. Returns
+/// empty if `argv` is null or `argc <= 0`.
+///
+/// The borrows are tied to libpam's argv, which is only valid for the duration of this PAM
+/// call; the lifetime `'a` is unconstrained, so callers MUST consume them before returning
+/// control to libpam. `run` → `Args::parse` does exactly that — it copies every argument
+/// into owned `String`s, and the `Vec` is dropped before `pam_sm_authenticate` returns.
+///
+/// # Safety
+/// `argv` must point to at least `argc` pointers, each either null or a valid
+/// NUL-terminated C string that outlives the returned borrows.
+unsafe fn collect_args<'a>(argc: c_int, argv: *const *const c_char) -> Vec<&'a CStr> {
+    if argv.is_null() || argc <= 0 {
+        return Vec::new();
     }
+    let mut out = Vec::with_capacity(argc as usize);
+    for i in 0..argc as isize {
+        // SAFETY: the caller guarantees argv has at least argc entries.
+        let p = unsafe { *argv.offset(i) };
+        if !p.is_null() {
+            // SAFETY: the caller guarantees each non-null entry is a valid C string.
+            out.push(unsafe { CStr::from_ptr(p) });
+        }
+    }
+    out
 }
 
 fn run(args: Vec<&CStr>, pam_handle: &PamHandle) -> Result<()> {

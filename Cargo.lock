@@ -673,16 +673,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pam-bindings"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95ca8ded51d7b55e02c84ee36e024ea9843d800da0ed371e07e6733092bd073e"
-dependencies = [
- "libc",
- "zeroize",
-]
-
-[[package]]
 name = "pam-ssh-agent"
 version = "0.10.0"
 dependencies = [
@@ -692,7 +682,6 @@ dependencies = [
  "getrandom 0.4.2",
  "hostname 0.4.2",
  "log",
- "pam-bindings",
  "signature",
  "ssh-agent-client-rs",
  "ssh-encoding",
