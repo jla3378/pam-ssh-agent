@@ -1,12 +1,12 @@
 [package]
 name = "pam-ssh-agent"
-version = "0.9.7"
+version = "0.10.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/nresare/pam-ssh-agent"
 authors = ["Noa Resare"]
 description = """
-A PAM module that authenticates using the ssh-agent.
+A macOS-only PAM module that authenticates using the ssh-agent.
 """
 rust-version = "1.88"
 
@@ -22,17 +22,10 @@ ssh-key = { version = "0.6", features = ["crypto"] }
 signature = "2.2"
 anyhow = "1.0"
 pam-bindings = "0.3"
-# Keep this on 6.x until https://bugzilla.redhat.com/show_bug.cgi?id=2300127 is resolved
 syslog = "6.1"
 uzers = { version = "0.12", default-features = false }
 hostname = { version = "0.4", default-features = false }
 log = "0.4"
-
-# The native-crypto dependencies
-openssl = { version = "0.10", optional = true }
-p256 = { version = "0.13", optional = true }
-p384 = { version = "0.13", optional = true }
-p521 = { version = "0.13", optional = true }
 wait-timeout = "0.2"
 
 [dev-dependencies]
@@ -40,6 +33,3 @@ base64 = "0.22"
 # this version needs to match the version brought in by ssh-key
 ssh-encoding = "0.2"
 env_logger = "0.11"
-
-[features]
-native-crypto = ["dep:openssl", "dep:p256", "dep:p384", "dep:p521"]

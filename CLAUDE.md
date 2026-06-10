@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Linux/Unix PAM authentication module (Rust) that proves a user's identity by having a (possibly remote, agent-forwarded) `ssh-agent` sign a random challenge with a private key whose public key is trusted by this module. It is a clean-room re-implementation of `pam_ssh_agent_auth` and also supports SSH certificates. It compiles to a C-ABI shared library (`libpam_ssh_agent.so`) loaded by PAM. See `README.md` for end-user configuration, PAM options, variable expansions, and the `sshd`/`SSH_AUTH_INFO_0` special case.
+A **macOS-only** PAM authentication module (Rust, targeting OpenPAM) that proves a user's identity by having a (possibly remote, agent-forwarded) `ssh-agent` sign a random challenge with a private key whose public key is trusted by this module. It is a clean-room re-implementation of `pam_ssh_agent_auth` and also supports SSH certificates. It compiles to a C-ABI shared library (`libpam_ssh_agent.dylib`, shipped as an **arm64e** module named `pam_ssh_agent.so`) loaded by macOS's PAM. See `README.md` for end-user configuration, PAM options, variable expansions, and the `sshd`/`SSH_AUTH_INFO_0` special case.
 
 This is **security-sensitive software**: a bug can grant undue privilege escalation. The overriding design goals are robustness and reviewability — prefer clear, auditable code and lean on vetted upstream crates (`ssh-key`, `ssh-agent-client-rs`, `pam-bindings`) rather than hand-rolling crypto or protocol logic.
 
@@ -18,16 +18,13 @@ cargo build              # default build (pure-Rust crypto)
 cargo test               # unit + integration tests
 cargo clippy --no-deps   # lint
 
-# Release artifact (the PAM module): target/release/libpam_ssh_agent.so
+# Host-arch debug artifact: target/debug/libpam_ssh_agent.dylib
 cargo build --release
 ```
 
-Crypto-backend variants (CI runs the test suite for both):
-
-```sh
-cargo test --no-default-features                          # pure-Rust crypto (ssh-key)
-cargo test --no-default-features --features native-crypto # OpenSSL backend; needs libssl-dev + libpam0g-dev
-```
+The crypto/PAM logic is architecture-independent, so `cargo build`/`cargo test` run on the host
+toolchain. The **shippable** artifact is a thin **arm64e** dylib (see P4/Makefile in later
+phases) — arm64e is a tier-3 Rust target requiring nightly + `-Zbuild-std`.
 
 Running specific tests / examples:
 
@@ -41,7 +38,7 @@ cargo run --example authenticator -- tests/data/authorized_keys
 cargo run --example testdata -- <pubkey>   # generates signature test vectors
 ```
 
-Requires Rust 1.85+ (edition 2024; the Debian packaging pins 1.85).
+Requires Rust 1.88+ (edition 2024) for host-arch checks; nightly for the arm64e module. macOS only.
 
 ## Architecture
 
@@ -51,7 +48,7 @@ Requires Rust 1.85+ (edition 2024; the Debian packaging pins 1.85).
 
 **Trust configuration** (`src/filter.rs::IdentityFilter`). Holds two `HashSet<KeyData>`: plain authorized keys and `cert-authority` keys. Sources, in combination: the `file=` authorized_keys file, a `ca_keys_file=` (raw CA keys, no prefix, OpenSSH `TrustedUserCAKeys`-style), and/or an `authorized_keys_command=` whose stdout is parsed as authorized_keys. The `cert-authority` option prefix in an authorized_keys line routes a key into the CA set.
 
-**Crypto backend dispatch** (`src/verify.rs`). `verify()` is backend-agnostic; conditional `use` statements at the top of the file pick the implementation at compile time: default uses `ssh-key`'s pure-Rust `signature::Verifier`; the `native-crypto` feature instead routes to `src/nativecrypto.rs`, which reimplements verification over OpenSSL (for environments mandating FIPS-validated crypto). When touching verification, keep both paths behaving identically — `src/verify.rs`'s tests run under both features.
+**Signature verification** (`src/verify.rs`). `verify()` uses `ssh-key`'s pure-Rust `signature::Verifier` over `KeyData`. (Upstream had an optional OpenSSL `native-crypto` backend for FIPS-mandated Linux distros; this macOS-only fork removed it along with `src/nativecrypto.rs`.)
 
 **Testability via trait seams.** External, hard-to-test dependencies are abstracted behind small traits so tests can inject fakes:
 - `SSHAgent` (`src/agent.rs`) wraps `ssh_agent_client_rs::Client` (`list_identities`, `sign`).
@@ -67,4 +64,4 @@ Requires Rust 1.85+ (edition 2024; the Debian packaging pins 1.85).
 - **Tests resolve paths two different ways.** Compile-time paths via the `data!` macro / `include_str!` resolve from `$CARGO_MANIFEST_DIR/tests/data/`, but runtime file paths in integration tests are written relative to the repo root (e.g. `"tests/data/authorized_keys"`), so `cargo test` must be run from the project root. Regenerate test keys/certs per the recipe in `tests/data/README.md`.
 - **Certificates currently must have an expiry** (upstream `ssh-key` bug); see the note in `README.md`. Don't assume non-expiring certs work yet.
 - **Home-directory (`~`/`%h`) expansion is intentionally unsafe** and documented as such — do not extend or "improve" it toward making attacker-controlled key files easier to use.
-- A couple of dependencies are deliberately pinned to older majors (`syslog` 6.x, `hostname` 0.3.x) with comments in `Cargo.toml` citing distro-packaging bugs — don't bump them without checking those.
+- **macOS PAM specifics matter** — OpenPAM numbers result codes differently from Linux-PAM (e.g. `PAM_AUTH_ERR=9`, not 7), `/usr/lib/pam` is SIP-protected, and PAM hosts (`sudo`/`su`/`sshd`) are arm64e. See `AUDIT.md` for the full list.

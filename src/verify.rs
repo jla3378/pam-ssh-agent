@@ -1,6 +1,3 @@
-#[cfg(feature = "native-crypto")]
-use crate::nativecrypto::PublicKeyVerifier;
-#[cfg(not(feature = "native-crypto"))]
 use signature::Verifier;
 use ssh_key::Signature;
 use ssh_key::public::KeyData;
@@ -10,8 +7,9 @@ pub fn verify(
     message: &[u8],
     signature: &Signature,
 ) -> Result<(), signature::Error> {
-    // the magic happens in the conditional use statements above. This is either invoking
-    // the pure rust implementations or OpenSSL through the code in the nativecrypto module
+    // Signature verification uses the pure-Rust `ssh-key` implementation. (An OpenSSL
+    // backend existed upstream for FIPS-mandated Linux distros; it was dropped in this
+    // macOS-only fork.)
     key_data.verify(message, signature)
 }
 

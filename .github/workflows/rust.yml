@@ -10,34 +10,34 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - name: No default features
-            flags: --no-default-features
-          - name: Native-crypto feature
-            flags: --no-default-features --features native-crypto
+  # Correctness checks run on the host toolchain/architecture. The crypto and PAM
+  # logic is architecture-independent, so these do not need to run as arm64e.
+  check:
+    runs-on: macos-15
     steps:
-    - uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
     - uses: actions/checkout@v4
-    - name: Install libpam, libssl-dev
-      run: sudo apt -y install libpam0g-dev libssl-dev
     - name: Format check
       run: cargo fmt --check
     - name: Build
       run: cargo build --verbose
-    - name: Run tests with $${{ matrix.name }}
-      run: cargo test --verbose ${{ matrix.flags }}
+    - name: Test
+      run: cargo test --verbose
     - name: Clippy check
       run: cargo clippy --no-deps
+
+  # The shippable artifact is a thin arm64e dylib, which requires a nightly toolchain
+  # plus -Zbuild-std (arm64e-apple-darwin is a tier-3 target with no prebuilt std).
+  arm64e-module:
+    runs-on: macos-15
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install nightly + rust-src
+      run: rustup toolchain install nightly --profile minimal --component rust-src
+    - name: Build arm64e PAM module
+      run: rustup run nightly cargo build -Z build-std=std --release --target arm64e-apple-darwin
+    - name: Inspect artifact
+      run: |
+        DY=target/arm64e-apple-darwin/release/libpam_ssh_agent.dylib
+        file "$DY"
+        otool -L "$DY" | grep -i pam
+        nm -gU "$DY" | grep pam_sm

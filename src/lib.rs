@@ -1,3 +1,7 @@
+// This is a macOS-only fork: it targets OpenPAM and is built as an arm64e PAM module.
+#[cfg(not(target_os = "macos"))]
+compile_error!("pam-ssh-agent (this fork) is macOS-only");
+
 mod agent;
 mod args;
 mod auth;
@@ -6,8 +10,6 @@ mod environment;
 mod expansions;
 pub mod filter;
 mod logging;
-#[cfg(feature = "native-crypto")]
-mod nativecrypto;
 mod pamext;
 #[cfg(test)]
 mod test;

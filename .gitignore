@@ -1,7 +1,5 @@
 /target/
 /.idea/
-/vendor/
-/debian/cargo_home/
 
 # macOS
 .DS_Store

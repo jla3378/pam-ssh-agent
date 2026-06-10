@@ -1,1 +1,0 @@
-extend-diff-ignore = "(^|\/)(\.idea\/.*|\.copr/.*|pam_ssh_agent.spec)$"
