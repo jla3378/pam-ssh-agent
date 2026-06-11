@@ -332,7 +332,7 @@ mod tests {
     // Regression fuzzer for the sshd SSH_AUTH_INFO_0 handling: the entry parser and the
     // whole check_sshd_special_case path (fed a fuzzed SSH_AUTH_INFO_0 and principal).
     #[test]
-    #[ignore = "fuzz harness; run with: cargo test --ignored"]
+    #[ignore = "fuzz harness; run with: cargo test -- --ignored"]
     fn fuzz_sshd_authinfo() {
         use crate::parse_auth_info_identity;
         use crate::test::{FixedEnv, Fuzzer, fuzz_iters};

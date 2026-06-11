@@ -199,7 +199,7 @@ mod test {
     // Regression fuzzer for the PAM option parser (split-on-'=', UTF-8 validation, and the
     // variable expansion it triggers on values).
     #[test]
-    #[ignore = "fuzz harness; run with: cargo test --ignored"]
+    #[ignore = "fuzz harness; run with: cargo test -- --ignored"]
     fn fuzz_args_parse() {
         use crate::test::{FixedEnv, FixedHandle, Fuzzer, fuzz_iters};
         let seeds = [

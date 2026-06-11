@@ -135,7 +135,7 @@ mod tests {
     // helpers (the prime panic risk is slicing on a non-char boundary). Adversarial values
     // go through both the input string AND the OS-lookup fakes' return values.
     #[test]
-    #[ignore = "fuzz harness; run with: cargo test --ignored"]
+    #[ignore = "fuzz harness; run with: cargo test -- --ignored"]
     fn fuzz_expand_vars() {
         use crate::test::{FixedEnv, FixedHandle, Fuzzer, fuzz_iters};
         let seeds = ["", "~/file", "~bob/x", "%h/%H/%u", "/etc/%f/%U"];

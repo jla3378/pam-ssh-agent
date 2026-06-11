@@ -167,7 +167,7 @@ mod test {
     // ssh_key::Certificate::from_openssh and validate_cert. Asserts only that neither
     // panics (signature soundness is enforced inside validate_cert via validate_at).
     #[test]
-    #[ignore = "fuzz harness; run with: cargo test --ignored"]
+    #[ignore = "fuzz harness; run with: cargo test -- --ignored"]
     fn fuzz_validate_cert() {
         use crate::test::{Fuzzer, fuzz_iters};
         let seeds = [CERT_STR];

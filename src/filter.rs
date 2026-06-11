@@ -209,7 +209,7 @@ mod tests {
     // Regression fuzzer for authorized_keys parsing (from_str + the ssh-key AuthorizedKeys
     // parser), in both the plain-key and cert-authority modes.
     #[test]
-    #[ignore = "fuzz harness; run with: cargo test --ignored"]
+    #[ignore = "fuzz harness; run with: cargo test -- --ignored"]
     fn fuzz_from_str() {
         use crate::test::{Fuzzer, fuzz_iters};
         let seeds = [

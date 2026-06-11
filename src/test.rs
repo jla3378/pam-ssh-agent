@@ -109,7 +109,7 @@ impl PamHandleExt for DummyHandle {
 
 // ---------------------------------------------------------------------------
 // Fuzzing support, shared by the `#[ignore]`d regression fuzz harnesses in the
-// individual modules. Run them all with:  cargo test --ignored
+// individual modules. Run them all with:  cargo test fuzz_ -- --ignored
 // Crank the iteration count via the FUZZ_ITERS env var, e.g. FUZZ_ITERS=2000000.
 
 /// Iteration count for the fuzz harnesses (override with FUZZ_ITERS).
