@@ -106,3 +106,163 @@ impl PamHandleExt for DummyHandle {
         panic!()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Fuzzing support, shared by the `#[ignore]`d regression fuzz harnesses in the
+// individual modules. Run them all with:  cargo test --ignored
+// Crank the iteration count via the FUZZ_ITERS env var, e.g. FUZZ_ITERS=2000000.
+
+/// Iteration count for the fuzz harnesses (override with FUZZ_ITERS).
+pub(crate) fn fuzz_iters() -> usize {
+    std::env::var("FUZZ_ITERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100_000)
+}
+
+/// A tiny deterministic, reproducible source of adversarial byte strings — not
+/// cryptographic, just a fixed-seed xorshift PRNG plus a corpus/dictionary
+/// mutator used to hammer the hand-written parsers. Seeds and dictionary tokens
+/// are target-specific and supplied by each harness.
+pub(crate) struct Fuzzer {
+    state: u64,
+    corpus: Vec<Vec<u8>>,
+    dict: Vec<Vec<u8>>,
+}
+
+impl Fuzzer {
+    pub(crate) fn new(seeds: &[&str], dict: &[&str]) -> Self {
+        Fuzzer {
+            state: 0x9E37_79B9_7F4A_7C15,
+            corpus: seeds.iter().map(|s| s.as_bytes().to_vec()).collect(),
+            dict: dict.iter().map(|s| s.as_bytes().to_vec()).collect(),
+        }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.state = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        if n == 0 {
+            0
+        } else {
+            (self.next_u64() % n as u64) as usize
+        }
+    }
+
+    /// One arbitrary u64 (for fuzzing numeric inputs like timestamps).
+    pub(crate) fn any_u64(&mut self) -> u64 {
+        self.next_u64()
+    }
+
+    /// A coin flip (for fuzzing bool inputs).
+    pub(crate) fn coin(&mut self) -> bool {
+        self.next_u64() & 1 == 0
+    }
+
+    /// Produce one mutated input as raw bytes (capped at 64 KiB).
+    pub(crate) fn next_bytes(&mut self) -> Vec<u8> {
+        const CHARS: [char; 8] = ['é', '中', '😀', '\u{0}', '~', '%', '/', '\n'];
+        let pick = self.below(self.corpus.len());
+        let mut buf = self.corpus[pick].clone();
+        for _ in 0..1 + self.below(6) {
+            if buf.is_empty() {
+                buf.push((self.next_u64() & 0xff) as u8);
+                continue;
+            }
+            match self.next_u64() % 7 {
+                0 => {
+                    let i = self.below(buf.len());
+                    buf[i] = (self.next_u64() & 0xff) as u8;
+                }
+                1 => {
+                    let i = self.below(buf.len() + 1);
+                    buf.insert(i, (self.next_u64() & 0xff) as u8);
+                }
+                2 => {
+                    let i = self.below(buf.len());
+                    buf.remove(i);
+                }
+                3 => {
+                    let d = self.below(self.dict.len());
+                    let tok = self.dict[d].clone();
+                    let i = self.below(buf.len() + 1);
+                    buf.splice(i..i, tok);
+                }
+                4 => {
+                    let o = self.below(self.corpus.len());
+                    let other = self.corpus[o].clone();
+                    buf.extend(other);
+                }
+                5 => {
+                    let a = self.below(buf.len());
+                    let len = 1 + self.below(buf.len() - a);
+                    let slice = buf[a..a + len].to_vec();
+                    for _ in 0..self.below(64) {
+                        buf.extend_from_slice(&slice);
+                    }
+                }
+                _ => {
+                    let c = CHARS[self.below(CHARS.len())];
+                    let i = self.below(buf.len() + 1);
+                    let mut tmp = [0u8; 4];
+                    let enc = c.encode_utf8(&mut tmp).as_bytes().to_vec();
+                    buf.splice(i..i, enc);
+                }
+            }
+            buf.truncate(1 << 16);
+        }
+        buf
+    }
+
+    /// One mutated input as a (lossy) String.
+    pub(crate) fn next_string(&mut self) -> String {
+        String::from_utf8_lossy(&self.next_bytes()).into_owned()
+    }
+}
+
+/// An `Environment`/`PamHandleExt` fake that returns a fixed (per-instance) value
+/// from every method, so a fuzz harness can push adversarial strings through the
+/// OS-lookup seam without the fakes themselves erroring or exhausting.
+pub(crate) struct FixedEnv {
+    pub(crate) value: String,
+    pub(crate) uid: uid_t,
+}
+
+impl Environment for FixedEnv {
+    fn get_homedir(&self, _user: &str) -> Result<String> {
+        Ok(self.value.clone())
+    }
+    fn get_hostname(&self) -> Result<String> {
+        Ok(self.value.clone())
+    }
+    fn get_fqdn(&self) -> Result<String> {
+        Ok(self.value.clone())
+    }
+    fn get_uid(&self, _user: &str) -> Result<uid_t> {
+        Ok(self.uid)
+    }
+    fn get_env(&self, _name: &str) -> Option<String> {
+        Some(self.value.clone())
+    }
+}
+
+pub(crate) struct FixedHandle {
+    pub(crate) user: String,
+    pub(crate) service: String,
+}
+
+impl PamHandleExt for FixedHandle {
+    fn get_calling_user(&self) -> Result<String> {
+        Ok(self.user.clone())
+    }
+    fn get_service(&self) -> Result<String> {
+        Ok(self.service.clone())
+    }
+}

@@ -205,4 +205,39 @@ mod tests {
         assert!(filter.filter(&identity));
         Ok(())
     }
+
+    // Regression fuzzer for authorized_keys parsing (from_str + the ssh-key AuthorizedKeys
+    // parser), in both the plain-key and cert-authority modes.
+    #[test]
+    #[ignore = "fuzz harness; run with: cargo test --ignored"]
+    fn fuzz_from_str() {
+        use crate::test::{Fuzzer, fuzz_iters};
+        let seeds = [
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIObUcRy1Nv6fz4xnAXqOaFL/A+gGM9OF+l2qpsDPmMlU x",
+            "cert-authority ssh-ed25519 AAAA",
+            "# comment",
+            "",
+        ];
+        let dict = [
+            "ssh-ed25519 ",
+            "ssh-rsa ",
+            "cert-authority ",
+            "AAAAC3NzaC1lZDI1NTE5",
+            " comment",
+            "\n",
+            "#",
+            "command=\"x\" ",
+            "no-pty ",
+        ];
+        let mut f = Fuzzer::new(&seeds, &dict);
+        for _ in 0..fuzz_iters() {
+            let buf = f.next_string();
+            let ca = f.coin();
+            let probe = buf.clone();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = super::from_str(&buf, "fuzz", ca);
+            }));
+            assert!(r.is_ok(), "from_str panicked (ca_keys={ca}) on {probe:?}");
+        }
+    }
 }

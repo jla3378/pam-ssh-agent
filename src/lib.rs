@@ -328,4 +328,54 @@ mod tests {
 
         Ok(())
     }
+
+    // Regression fuzzer for the sshd SSH_AUTH_INFO_0 handling: the entry parser and the
+    // whole check_sshd_special_case path (fed a fuzzed SSH_AUTH_INFO_0 and principal).
+    #[test]
+    #[ignore = "fuzz harness; run with: cargo test --ignored"]
+    fn fuzz_sshd_authinfo() {
+        use crate::parse_auth_info_identity;
+        use crate::test::{FixedEnv, Fuzzer, fuzz_iters};
+        let seeds = [
+            "publickey ssh-ed25519 AAAA",
+            "ssh-ed25519-cert-v01@openssh.com AAAA",
+            "publickey x",
+            "",
+        ];
+        let dict = [
+            "publickey ",
+            "ssh-ed25519",
+            "ssh-ed25519-cert-v01@openssh.com",
+            "ssh-rsa",
+            "AAAA",
+            " ",
+            "\n",
+            "-cert-v01@openssh.com",
+        ];
+        let filter =
+            IdentityFilter::from_authorized_file(Path::new(data!("authorized_keys"))).unwrap();
+        let mut f = Fuzzer::new(&seeds, &dict);
+        for _ in 0..fuzz_iters() {
+            let entry = f.next_string();
+            let probe = entry.clone();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = parse_auth_info_identity(&entry);
+            }));
+            assert!(r.is_ok(), "parse_auth_info_identity panicked on {probe:?}");
+
+            let info = f.next_string();
+            let principal = f.next_string();
+            let env = FixedEnv {
+                value: info.clone(),
+                uid: 0,
+            };
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = check_sshd_special_case(Some("sshd".to_string()), &filter, env, &principal);
+            }));
+            assert!(
+                r.is_ok(),
+                "check_sshd_special_case panicked on SSH_AUTH_INFO_0={info:?}"
+            );
+        }
+    }
 }

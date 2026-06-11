@@ -195,4 +195,65 @@ mod test {
         );
         Ok(())
     }
+
+    // Regression fuzzer for the PAM option parser (split-on-'=', UTF-8 validation, and the
+    // variable expansion it triggers on values).
+    #[test]
+    #[ignore = "fuzz harness; run with: cargo test --ignored"]
+    fn fuzz_args_parse() {
+        use crate::test::{FixedEnv, FixedHandle, Fuzzer, fuzz_iters};
+        let seeds = [
+            "debug",
+            "file=/x",
+            "file=~/x",
+            "ca_keys_file=%h/ca",
+            "bad",
+            "=",
+        ];
+        let dict = [
+            "debug",
+            "file=",
+            "ca_keys_file=",
+            "authorized_keys_command=",
+            "authorized_keys_command_user=",
+            "default_ssh_auth_sock=",
+            "=",
+            "==",
+            "a=b=c",
+            "%h",
+            "%H",
+            "%u",
+            "%f",
+            "%U",
+            "~",
+            "~bob",
+            "/",
+        ];
+        // Non-panicking fakes: Args::parse runs expand_vars on every non-"debug" arg.
+        let env = FixedEnv {
+            value: "v".into(),
+            uid: 0,
+        };
+        let handle = FixedHandle {
+            user: "u".into(),
+            service: "s".into(),
+        };
+        let mut f = Fuzzer::new(&seeds, &dict);
+        for _ in 0..fuzz_iters() {
+            // 1-3 args; CString rejects an interior NUL, so strip it before building.
+            let raw: Vec<Vec<u8>> = (0..1 + f.any_u64() as usize % 3)
+                .map(|_| f.next_bytes().into_iter().filter(|b| *b != 0).collect())
+                .collect();
+            let owned: Vec<CString> = raw
+                .iter()
+                .map(|b| CString::new(b.clone()).expect("NUL bytes stripped above"))
+                .collect();
+            let args: Vec<&CStr> = owned.iter().map(|c| c.as_c_str()).collect();
+            let probe = raw.clone();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = Args::parse(args, &env, &handle);
+            }));
+            assert!(r.is_ok(), "Args::parse panicked on {probe:?}");
+        }
+    }
 }

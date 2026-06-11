@@ -130,4 +130,32 @@ mod tests {
         assert_eq!("", get_username("~/foo", 0));
         assert_eq!("bob", get_username("~bob", 0));
     }
+
+    // Regression fuzzer: hammers the hand-written byte-index slicing in expand_vars and its
+    // helpers (the prime panic risk is slicing on a non-char boundary). Adversarial values
+    // go through both the input string AND the OS-lookup fakes' return values.
+    #[test]
+    #[ignore = "fuzz harness; run with: cargo test --ignored"]
+    fn fuzz_expand_vars() {
+        use crate::test::{FixedEnv, FixedHandle, Fuzzer, fuzz_iters};
+        let seeds = ["", "~/file", "~bob/x", "%h/%H/%u", "/etc/%f/%U"];
+        let dict = ["~", "~name", "/", "%h", "%H", "%f", "%u", "%U", "%"];
+        let mut f = Fuzzer::new(&seeds, &dict);
+        for _ in 0..fuzz_iters() {
+            let input = f.next_string();
+            let env = FixedEnv {
+                value: f.next_string(),
+                uid: f.any_u64() as u32,
+            };
+            let handle = FixedHandle {
+                user: f.next_string(),
+                service: f.next_string(),
+            };
+            let probe = input.clone();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = expand_vars(input, &env, &handle);
+            }));
+            assert!(r.is_ok(), "expand_vars panicked on {probe:?}");
+        }
+    }
 }
