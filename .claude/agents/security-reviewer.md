@@ -33,7 +33,9 @@ file or PR, focus there but read enough surrounding code to judge correctness.
    unsafe — flag any change that widens attacker control over which key file is read.
 6. **sshd special case** (`src/lib.rs::check_sshd_special_case`): triggers only when service is
    exactly `sshd`, and the `SSH_AUTH_INFO_0` key must match a trusted key — never short-circuit to
-   success without that match.
+   success without that match. (On macOS this path is expected to be inert: `sshd`'s
+   `ExposeAuthInfo` exposes `SSH_USER_AUTH`, a file, not the inline `SSH_AUTH_INFO_0` the code
+   reads, so it fails closed to the normal challenge-response — but still verify no bypass if set.)
 7. **PAM FFI boundary** (`src/openpam.rs`, `src/lib.rs`): this fork ships its own OpenPAM
    bindings, not the `pam-bindings` crate. **OpenPAM numbers result codes differently from
    Linux-PAM** — `PAM_AUTH_ERR` is **9** (Linux is 7); only `PAM_SUCCESS` (0) agrees. Verify the

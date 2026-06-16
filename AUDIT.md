@@ -143,3 +143,39 @@ rustup run nightly cargo build -Z build-std=std --release --target arm64e-apple-
 Gotcha: third-party arm64e **executables** can't run under Apple's preview-ABI rules, so the
 unit/integration tests (`make check`) run on the **host arch**; only the shipped dylib is
 arm64e. The crypto and PAM logic is architecture-independent, so host-arch testing is sound.
+
+## Audited against macOS documentation (v0.10.0)
+
+A claim-by-claim check of this repo's macOS-specific assertions against primary local sources —
+the macOS SDK headers under `$(xcrun --show-sdk-path)/usr/include/security/` and the installed
+OpenPAM / `sshd_config` man pages. (A web deep-research pass was attempted but blocked; the local
+SDK headers and man pages are the authoritative primary sources anyway.) **Confirmed:**
+
+* **PAM result codes** — `security/pam_constants.h`: `PAM_SUCCESS=0`, `PAM_PERM_DENIED=7`,
+  **`PAM_AUTH_ERR=9`**, `PAM_SERVICE=1`, `PAM_USER=2`. Matches `src/openpam.rs` exactly.
+* **PAM C prototypes** — `security/pam_appl.h`: `pam_get_item(const pam_handle_t *, …)` and
+  `pam_get_user(pam_handle_t *, …)` (note: `pam_get_user`'s `pamh` is **non-const**). We declare
+  both `pamh` as `*const`; this is ABI-compatible and the `pam_get_user` case is noted in the FFI
+  comment.
+* **`pam_get_user` prompt behaviour** — `man 3 pam_get_user`: "If no user was specified, nor set
+  using pam_set_item(3), pam_get_user will prompt for a user name"; a NULL prompt falls back to
+  `PAM_USER_PROMPT`, then a hardcoded default. Matches our use (we pass NULL).
+* **`sudo_local`** — `/etc/pam.d/sudo` contains `auth include sudo_local`, and
+  `/etc/pam.d/sudo_local.template` states it is "a local config file which survives system update
+  and is included for sudo". Matches the README install instructions.
+* **`nobody`** — `id nobody` → uid/gid `4294967294` (`(gid_t)-2`). Matches the `src/cmd.rs`
+  privilege-drop constant.
+
+**Correction — the sshd `SSH_AUTH_INFO_0` special case is expected to be inert on macOS.**
+`man sshd_config` (macOS OpenSSH 10.3p1) documents `ExposeAuthInfo` as exposing the auth info to
+the session via the **`SSH_USER_AUTH`** environment variable — a path to a temporary file — not
+as the inline `SSH_AUTH_INFO_0` value that `src/lib.rs::check_sshd_special_case` reads; and the
+`SSH_AUTH_INFO_0` string is absent from the macOS `sshd` binary. So on macOS the "sufficient"
+shortcut will not fire and authentication falls through to the normal challenge-response
+(fail-safe). The code path is retained from the `pam_ssh_agent_auth` lineage (documented as such
+in `README.md`); FIX A above — the parsing fix — still applies wherever the variable is set.
+
+(Other documented macOS facts — `/usr/lib/pam` SIP protection, sudo env-scrubbing /
+`env_keep SSH_AUTH_SOCK`, syslog `AUTHPRIV` routed into the unified logging system, the arm64e
+"preview" ABI requiring nightly + `-Zbuild-std`, and the cdylib linking `libpam.2.dylib` without
+a build script — were verified live earlier in this audit and stand.)

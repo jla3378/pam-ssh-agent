@@ -205,6 +205,14 @@ and contains a public key and that public key matches any of the configured publ
 returns `PAM_SUCCESS`. The environment variable is set by `sshd` to contain the public key that was used by its
 pubkey authentication method. This requires `ExposeAuthInfo yes` in `sshd_config`.
 
+> [!WARNING]
+> This special case is inherited from the Linux `pam_ssh_agent_auth` lineage and is expected to
+> be **inert on macOS**. macOS `sshd` (OpenSSH 10.3p1) documents `ExposeAuthInfo` as exposing the
+> auth info to the session through the **`SSH_USER_AUTH`** environment variable — a path to a
+> temporary file — not as the inline `SSH_AUTH_INFO_0` value this module reads, and the
+> `SSH_AUTH_INFO_0` string is not present in the macOS `sshd` binary. So on macOS the shortcut
+> will not fire and authentication falls through to the normal challenge-response (fail-safe).
+
 This allows for `sshd` to be configured with this module as a `sufficient` authentication mechanism along with
 other mechanisms such as for example a time based one-time-password. If the key used in `sshd`'s initial authentication
 is in the list of higher security keys that this plugin is configured with, no additional authentication is required. 
