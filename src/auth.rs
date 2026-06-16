@@ -67,8 +67,8 @@ pub(crate) fn validate_cert(
 
     if let Err(e) = cert.validate_at(
         when.duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_secs(),
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
         vec![&ca_key.fingerprint(HashAlg::Sha256)],
     ) {
         info!("Certificate validation failed: {e:?}");
@@ -151,42 +151,29 @@ mod test {
         SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp)
     }
 
-    // Like st(), but never panics for arbitrary fuzz input: if UNIX_EPOCH + secs is not a
-    // representable SystemTime, halve secs until it is. (Production always passes
-    // SystemTime::now(), so an un-representable time can only arise in the fuzzer.)
-    fn st_saturating(mut secs: u64) -> SystemTime {
-        loop {
-            if let Some(t) = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs)) {
-                return t;
-            }
-            secs /= 2;
-        }
-    }
-
     // Regression fuzzer: mutate the valid CERT_STR and feed it through
     // ssh_key::Certificate::from_openssh and validate_cert. Asserts only that neither
     // panics (signature soundness is enforced inside validate_cert via validate_at).
     #[test]
     #[ignore = "fuzz harness; run with: cargo test -- --ignored"]
     fn fuzz_validate_cert() {
-        use crate::test::{Fuzzer, fuzz_iters};
+        use crate::test::{Fuzzer, assert_no_panic, fuzz_iters};
         let seeds = [CERT_STR];
         let dict = ["AAAA", "ssh-ed25519-cert-v01@openssh.com", " ", "\n", "="];
         let mut f = Fuzzer::new(&seeds, &dict);
         for _ in 0..fuzz_iters() {
             let s = f.next_string();
-            let when = st_saturating(f.any_u64());
+            // Clamp to a representable SystemTime (production passes SystemTime::now()).
+            let when = SystemTime::UNIX_EPOCH
+                .checked_add(Duration::from_secs(f.any_u64()))
+                .unwrap_or(SystemTime::UNIX_EPOCH);
             let principal = f.next_string();
             let probe = s.clone();
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_no_panic("from_openssh/validate_cert", probe, || {
                 if let Ok(cert) = Certificate::from_openssh(&s) {
                     let _ = validate_cert(&cert, when, &principal);
                 }
-            }));
-            assert!(
-                r.is_ok(),
-                "from_openssh/validate_cert panicked on {probe:?}"
-            );
+            });
         }
     }
 }

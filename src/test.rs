@@ -266,3 +266,10 @@ impl PamHandleExt for FixedHandle {
         Ok(self.service.clone())
     }
 }
+
+/// Run `f`, asserting it does not panic; on panic the message includes `probe`. Removes the
+/// repeated catch_unwind boilerplate from the `#[ignore]`d fuzz harnesses.
+pub(crate) fn assert_no_panic(label: &str, probe: impl std::fmt::Debug, f: impl FnOnce()) {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    assert!(r.is_ok(), "{label} panicked on {probe:?}");
+}

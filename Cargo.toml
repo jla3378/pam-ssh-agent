@@ -26,6 +26,8 @@ uzers = { version = "0.12", default-features = false }
 hostname = { version = "0.4", default-features = false }
 log = "0.4"
 wait-timeout = "0.2"
+# killpg(2) for reaping a timed-out command's whole process group (src/cmd.rs)
+libc = "0.2"
 
 [dev-dependencies]
 base64 = "0.22"

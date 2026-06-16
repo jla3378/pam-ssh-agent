@@ -30,69 +30,90 @@ pub fn run(
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .uid(effective_uid)
-        .gid(gid);
+        .gid(gid)
+        // Put the child in its own process group so we can SIGKILL the whole tree — any
+        // grandchildren the command forks that inherit our pipe fds — not just the direct
+        // child. Without this, a command that backgrounds a daemon holding stdout open would
+        // leave a reader thread blocked on read_to_end (pipe never reaches EOF) and could
+        // hang run() past the timeout.
+        .process_group(0);
 
     let mut child = cmd.spawn()?;
+    let pgid = child.id() as i32;
 
-    // Drain stdout and stderr on dedicated threads, concurrently with waiting for the
-    // child to exit. Otherwise a command that writes more than the OS pipe buffer (~64KB
-    // on macOS) blocks in write() because nothing reads the pipe until after the child is
-    // observed to exit — a deadlock that makes wait_timeout() hit the full timeout and
-    // spuriously deny authentication.
-    let stdout_reader = drain(
-        child
-            .stdout
-            .take()
-            .ok_or(anyhow!("failed to get stdout from {}", command[0]))?,
-    );
-    let stderr_reader = drain(
-        child
-            .stderr
-            .take()
-            .ok_or(anyhow!("failed to get stderr from {}", command[0]))?,
-    );
+    // Capture the pipes; if either is missing (cannot happen with Stdio::piped) kill the
+    // child rather than leak it.
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let _ = child.kill();
+        kill_process_group(pgid);
+        return Err(anyhow!(
+            "failed to capture stdout/stderr from {}",
+            command[0]
+        ));
+    };
 
-    match child.wait_timeout(timeout)? {
-        None => {
-            child.kill()?;
-            // The child is dead now, so its pipe write ends close and the reader threads
-            // hit EOF and finish; we drop their handles (detach) rather than risk blocking.
-            Err(anyhow!(
-                "Timed out waiting for command '{}' after {:?}",
-                command[0],
-                timeout
-            ))
-        }
-        Some(exit_status) => {
-            let stdout_buf = join_reader(stdout_reader, command[0], "stdout")?;
-            let stderr_buf = join_reader(stderr_reader, command[0], "stderr")?;
-            if exit_status.success() {
-                if !stderr_buf.is_empty() {
-                    for line in String::from_utf8_lossy(&stderr_buf).lines() {
-                        warn!("stderr from {}: {}", command[0], line);
-                    }
-                }
-                Ok(String::from_utf8(stdout_buf)?.trim_end().to_owned())
-            } else {
-                let code = exit_status
-                    .code()
-                    .as_ref()
-                    .map_or("caught signal".into(), i32::to_string);
-                Err(anyhow!(
-                    "Non-zero exit status from '{}': {}",
-                    command[0],
-                    code
-                ))
+    // Drain stdout and stderr on dedicated threads, concurrently with the wait. Otherwise a
+    // command that writes more than the OS pipe buffer (~64KB on macOS) blocks in write()
+    // because nothing reads the pipe until the child exits — a deadlock that would make
+    // wait_timeout() hit the full timeout and spuriously deny authentication.
+    let stdout_reader = drain(stdout);
+    let stderr_reader = drain(stderr);
+
+    let status = child.wait_timeout(timeout)?;
+    if status.is_none() {
+        let _ = child.kill();
+    }
+    // Reap the whole process group so any grandchildren holding the pipe fds die and the
+    // reader threads reach EOF (rather than blocking forever); this also enforces the
+    // timeout on a process that forks and lingers. Best-effort — ESRCH on an already-gone
+    // group is ignored.
+    kill_process_group(pgid);
+
+    let stdout_buf = join_reader(stdout_reader, command[0], "stdout")?;
+    let stderr_buf = join_reader(stderr_reader, command[0], "stderr")?;
+
+    let Some(exit_status) = status else {
+        return Err(anyhow!(
+            "Timed out waiting for command '{}' after {:?}",
+            command[0],
+            timeout
+        ));
+    };
+    if exit_status.success() {
+        if !stderr_buf.is_empty() {
+            for line in String::from_utf8_lossy(&stderr_buf).lines() {
+                warn!("stderr from {}: {}", command[0], line);
             }
         }
+        Ok(String::from_utf8(stdout_buf)?.trim_end().to_owned())
+    } else {
+        let code = exit_status
+            .code()
+            .as_ref()
+            .map_or("caught signal".into(), i32::to_string);
+        Err(anyhow!(
+            "Non-zero exit status from '{}': {}",
+            command[0],
+            code
+        ))
+    }
+}
+
+/// SIGKILL every process in process group `pgid` — the command and any grandchildren it
+/// forked that inherited our pipe fds — so the reader threads reach EOF. Best-effort: an
+/// empty/already-reaped group returns ESRCH, which is ignored.
+fn kill_process_group(pgid: i32) {
+    // SAFETY: killpg is a plain syscall with no memory-safety preconditions; its return
+    // value (e.g. ESRCH for an already-gone group) is intentionally ignored.
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
     }
 }
 
 /// Spawn a thread that reads `reader` to EOF, so a child writing more than the OS pipe
 /// buffer does not block waiting for the parent to drain it.
-fn drain<R: Read + Send + 'static>(reader: R) -> JoinHandle<std::io::Result<Vec<u8>>> {
+fn drain<R: Read + Send + 'static>(mut reader: R) -> JoinHandle<std::io::Result<Vec<u8>>> {
     thread::spawn(move || {
-        let mut reader = reader;
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf)?;
         Ok(buf)
@@ -121,6 +142,27 @@ mod tests {
     use uzers::{get_current_gid, get_current_uid};
 
     static TIMEOUT: Duration = Duration::from_secs(2);
+
+    // Regression: a command that backgrounds a grandchild which inherits stdout must not hang
+    // run() waiting for the pipe to close — the whole process group is killed after the wait,
+    // so this returns promptly instead of blocking for the grandchild's lifetime.
+    #[test]
+    fn test_run_grandchild_does_not_hang() -> Result<()> {
+        let start = std::time::Instant::now();
+        let out = run(
+            &["/bin/sh", "-c", "(sleep 10 &) ; echo done"],
+            TIMEOUT,
+            get_current_uid(),
+            Some(get_current_gid()),
+        )?;
+        assert_eq!(out, "done");
+        assert!(
+            start.elapsed() < TIMEOUT,
+            "run() should return promptly, took {:?}",
+            start.elapsed()
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_run() -> Result<()> {

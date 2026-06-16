@@ -137,7 +137,7 @@ mod tests {
     #[test]
     #[ignore = "fuzz harness; run with: cargo test -- --ignored"]
     fn fuzz_expand_vars() {
-        use crate::test::{FixedEnv, FixedHandle, Fuzzer, fuzz_iters};
+        use crate::test::{FixedEnv, FixedHandle, Fuzzer, assert_no_panic, fuzz_iters};
         let seeds = ["", "~/file", "~bob/x", "%h/%H/%u", "/etc/%f/%U"];
         let dict = ["~", "~name", "/", "%h", "%H", "%f", "%u", "%U", "%"];
         let mut f = Fuzzer::new(&seeds, &dict);
@@ -152,10 +152,9 @@ mod tests {
                 service: f.next_string(),
             };
             let probe = input.clone();
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_no_panic("expand_vars", probe, || {
                 let _ = expand_vars(input, &env, &handle);
-            }));
-            assert!(r.is_ok(), "expand_vars panicked on {probe:?}");
+            });
         }
     }
 }

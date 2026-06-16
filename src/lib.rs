@@ -59,7 +59,7 @@ pub unsafe extern "C" fn pam_sm_authenticate(
             return PAM_AUTH_ERR;
         };
         // SAFETY: argv holds argc entries per the C contract; collect_args bounds-checks.
-        let args = unsafe { collect_args(argc, argv) };
+        let args = unsafe { collect_args(argc, &argv) };
         match run(args, handle) {
             Ok(()) => {
                 debug!("Successful call to pam_sm_authenticate(), returning PAM_SUCCESS");
@@ -92,15 +92,16 @@ pub extern "C" fn pam_sm_setcred(
 /// Convert libpam's `(argc, argv)` into borrowed `CStr`s, skipping null entries. Returns
 /// empty if `argv` is null or `argc <= 0`.
 ///
-/// The borrows are tied to libpam's argv, which is only valid for the duration of this PAM
-/// call; the lifetime `'a` is unconstrained, so callers MUST consume them before returning
-/// control to libpam. `run` → `Args::parse` does exactly that — it copies every argument
-/// into owned `String`s, and the `Vec` is dropped before `pam_sm_authenticate` returns.
+/// The returned borrows point into libpam's argv, valid only for the duration of this PAM
+/// call. `'a` is tied to the `&argv` borrow so the borrow checker prevents the result from
+/// outliving this call (it cannot be stashed into a longer-lived binding). `run` →
+/// `Args::parse` copies every argument into owned `String`s, so nothing borrows argv past
+/// `pam_sm_authenticate`.
 ///
 /// # Safety
 /// `argv` must point to at least `argc` pointers, each either null or a valid
 /// NUL-terminated C string that outlives the returned borrows.
-unsafe fn collect_args<'a>(argc: c_int, argv: *const *const c_char) -> Vec<&'a CStr> {
+unsafe fn collect_args(argc: c_int, argv: &*const *const c_char) -> Vec<&CStr> {
     if argv.is_null() || argc <= 0 {
         return Vec::new();
     }
@@ -136,9 +137,7 @@ fn do_authenticate(args: &Args, handle: &PamHandle) -> Result<()> {
     let calling_user = handle.get_calling_user()?;
 
     info!("Authenticating user '{calling_user}' using ssh-agent at '{path}'");
-    if Path::new(&args.file).exists() {
-        info!("authorized keys from '{}'", &args.file);
-    }
+    info!("authorized keys file: '{}'", &args.file);
     if let Some(ca_keys_file) = &args.ca_keys_file {
         info!("ca_keys from '{ca_keys_file}'");
     };
@@ -164,7 +163,7 @@ fn do_authenticate(args: &Args, handle: &PamHandle) -> Result<()> {
     )? {
         return Ok(());
     }
-    match authenticate(&filter, ssh_agent_client, &handle.get_calling_user()?)? {
+    match authenticate(&filter, ssh_agent_client, &calling_user)? {
         true => Ok(()),
         false => Err(anyhow!("Agent did not know of any of the allowed keys")),
     }
@@ -232,6 +231,8 @@ fn check_sshd_special_case(
 /// type token.
 fn parse_auth_info_identity(entry: &str) -> Result<Identity<'static>> {
     let key_type = entry.split_whitespace().next().unwrap_or_default();
+    // ssh-key (0.6.x) exposes no public "is this a certificate algorithm" predicate, so match
+    // the certificate key-type suffix directly; every *-cert-v01@openssh.com algorithm has it.
     if key_type.ends_with("-cert-v01@openssh.com") {
         Ok(Certificate::from_openssh(entry)?.into())
     } else {
@@ -335,7 +336,7 @@ mod tests {
     #[ignore = "fuzz harness; run with: cargo test -- --ignored"]
     fn fuzz_sshd_authinfo() {
         use crate::parse_auth_info_identity;
-        use crate::test::{FixedEnv, Fuzzer, fuzz_iters};
+        use crate::test::{FixedEnv, Fuzzer, assert_no_panic, fuzz_iters};
         let seeds = [
             "publickey ssh-ed25519 AAAA",
             "ssh-ed25519-cert-v01@openssh.com AAAA",
@@ -358,10 +359,9 @@ mod tests {
         for _ in 0..fuzz_iters() {
             let entry = f.next_string();
             let probe = entry.clone();
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_no_panic("parse_auth_info_identity", probe, || {
                 let _ = parse_auth_info_identity(&entry);
-            }));
-            assert!(r.is_ok(), "parse_auth_info_identity panicked on {probe:?}");
+            });
 
             let info = f.next_string();
             let principal = f.next_string();
@@ -369,13 +369,9 @@ mod tests {
                 value: info.clone(),
                 uid: 0,
             };
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_no_panic("check_sshd_special_case on SSH_AUTH_INFO_0", info, || {
                 let _ = check_sshd_special_case(Some("sshd".to_string()), &filter, env, &principal);
-            }));
-            assert!(
-                r.is_ok(),
-                "check_sshd_special_case panicked on SSH_AUTH_INFO_0={info:?}"
-            );
+            });
         }
     }
 }

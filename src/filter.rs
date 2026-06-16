@@ -211,7 +211,7 @@ mod tests {
     #[test]
     #[ignore = "fuzz harness; run with: cargo test -- --ignored"]
     fn fuzz_from_str() {
-        use crate::test::{Fuzzer, fuzz_iters};
+        use crate::test::{Fuzzer, assert_no_panic, fuzz_iters};
         let seeds = [
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIObUcRy1Nv6fz4xnAXqOaFL/A+gGM9OF+l2qpsDPmMlU x",
             "cert-authority ssh-ed25519 AAAA",
@@ -234,10 +234,9 @@ mod tests {
             let buf = f.next_string();
             let ca = f.coin();
             let probe = buf.clone();
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_no_panic(&format!("from_str (ca_keys={ca})"), probe, || {
                 let _ = super::from_str(&buf, "fuzz", ca);
-            }));
-            assert!(r.is_ok(), "from_str panicked (ca_keys={ca}) on {probe:?}");
+            });
         }
     }
 }

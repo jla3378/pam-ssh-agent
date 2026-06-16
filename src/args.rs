@@ -201,7 +201,7 @@ mod test {
     #[test]
     #[ignore = "fuzz harness; run with: cargo test -- --ignored"]
     fn fuzz_args_parse() {
-        use crate::test::{FixedEnv, FixedHandle, Fuzzer, fuzz_iters};
+        use crate::test::{FixedEnv, FixedHandle, Fuzzer, assert_no_panic, fuzz_iters};
         let seeds = [
             "debug",
             "file=/x",
@@ -250,10 +250,9 @@ mod test {
                 .collect();
             let args: Vec<&CStr> = owned.iter().map(|c| c.as_c_str()).collect();
             let probe = raw.clone();
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_no_panic("Args::parse", probe, || {
                 let _ = Args::parse(args, &env, &handle);
-            }));
-            assert!(r.is_ok(), "Args::parse panicked on {probe:?}");
+            });
         }
     }
 }
