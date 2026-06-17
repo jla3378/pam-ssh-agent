@@ -36,6 +36,11 @@ use std::ffi::{CStr, c_char, c_int};
 use std::path::Path;
 use std::time::SystemTime;
 
+/// `pam-ssh-agent <version>`, concatenated at compile time. Referencing `CARGO_PKG_VERSION`
+/// bakes the version into the binary so it is discoverable via `strings`; it is also logged at
+/// the start of every authentication so the unified log records which build handled the request.
+const VERSION_BANNER: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
+
 /// PAM authentication entry point (called by libpam). Returns `PAM_SUCCESS` if the
 /// ssh-agent reachable through `SSH_AUTH_SOCK` signs a random challenge with a private key
 /// whose public key is trusted by this module's configuration, otherwise `PAM_AUTH_ERR`.
@@ -136,7 +141,7 @@ fn do_authenticate(args: &Args, handle: &PamHandle) -> Result<()> {
     let path = get_path(args)?;
     let calling_user = handle.get_calling_user()?;
 
-    info!("Authenticating user '{calling_user}' using ssh-agent at '{path}'");
+    info!("{VERSION_BANNER} authenticating user '{calling_user}' using ssh-agent at '{path}'");
     info!("authorized keys file: '{}'", &args.file);
     if let Some(ca_keys_file) = &args.ca_keys_file {
         info!("ca_keys from '{ca_keys_file}'");
