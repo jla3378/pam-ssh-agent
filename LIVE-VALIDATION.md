@@ -32,10 +32,14 @@ behavior can change — see the Tahoe note at the bottom).
   echo "$SSH_AUTH_SOCK"      # non-empty
   ssh-add -l                 # lists the key you'll authorize
   ```
-- The built + installed module:
+- The built, **load-verified**, and installed module:
   ```sh
-  make pam && make install   # -> /usr/local/lib/pam/pam_ssh_agent.so
+  make pam           # builds + realigns LINKEDIT so dyld will load it (see AUDIT.md)
+  make verify-load   # MUST print "dlopen OK" — if it fails, the module won't load into sudo either
+  make install       # -> /usr/local/lib/pam/pam_ssh_agent.so
   ```
+  > `make verify-load` is the cheap pre-flight that catches a non-loadable build before you
+  > touch the PAM stack. Do not wire an un-load-verified module into `sudo`.
 - `sudo` must forward the agent socket (it scrubs the environment by default):
   ```sh
   sudo visudo -f /etc/sudoers.d/ssh_agent_env

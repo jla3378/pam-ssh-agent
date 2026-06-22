@@ -55,6 +55,14 @@ rustup run nightly cargo build -Z build-std=std --release --target arm64e-apple-
 # -> target/arm64e-apple-darwin/release/libpam_ssh_agent.dylib  (thin arm64e, ad-hoc signed)
 ```
 
+> [!NOTE]
+> On macOS 26/Tahoe the current Apple linker emits a 4-byte-aligned symbol string table that
+> dyld refuses to load (`mis-aligned LINKEDIT string pool`), so the raw build above will not
+> `dlopen` into `sudo`. `make pam` works around this by running `scripts/realign-linkedit.py`
+> (8-aligns the string table, re-signs) after the build, and `make verify-load` confirms the
+> result loads in an arm64e process. Prefer `make pam` over the raw `cargo build` above; the
+> workaround no-ops once the toolchain is fixed. See `AUDIT.md`.
+
 Requires Rust 1.88+ (edition 2024) and a nightly toolchain for the arm64e build. The correctness checks in
 `make check` run on the host toolchain/architecture, since the crypto and PAM logic is
 architecture-independent.

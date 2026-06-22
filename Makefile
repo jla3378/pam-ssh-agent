@@ -19,8 +19,9 @@ PREFIX ?= /usr/local/lib/pam
 SIGN_IDENTITY ?= Developer ID Application
 NOTARY_PROFILE ?= pam-ssh-agent-notary
 NOTARIZE_ZIP := target/pam_ssh_agent-notarize.zip
+LOADCHECK := target/psa-loadcheck
 
-.PHONY: help check pam install uninstall sign notarize verify-artifact clean
+.PHONY: help check pam install uninstall sign notarize verify-artifact verify-load clean
 
 help:
 	@echo "Targets:"
@@ -31,6 +32,7 @@ help:
 	@echo "  sign      - build pam, then Developer ID sign (hardened runtime + timestamp)"
 	@echo "  notarize  - sign, then zip + submit to Apple notary (bare dylib is NOT stapled)"
 	@echo "  verify-artifact - inspect a built dylib: arch, exports, signature"
+	@echo "  verify-load     - dlopen the built dylib in an arm64e process (run on target macOS)"
 	@echo "  clean     - cargo clean"
 
 check:
@@ -41,11 +43,19 @@ check:
 # Homebrew's stable rustc/cargo shadow rustup's in PATH, so a bare `rustup run` ends up
 # invoking the stable rustc (which rejects -Z). Pin both cargo and rustc to the nightly
 # toolchain explicitly.
+#
+# Post-link: the ld-1328.2 linker lays out the LC_SYMTAB string table at a 4-byte-aligned
+# offset, which macOS 26/Tahoe dyld rejects ("mis-aligned LINKEDIT string pool") so the
+# module won't dlopen into sudo/su. realign-linkedit.py 8-aligns it (idempotent no-op once
+# the toolchain is fixed); we strip the linker signature first and re-sign ad-hoc after.
 pam:
 	RUSTC="$$(rustup which --toolchain $(PAM_TOOLCHAIN) rustc)" \
 		"$$(rustup which --toolchain $(PAM_TOOLCHAIN) cargo)" \
 		build -Z build-std=std --release --target $(TARGET)
-	@echo "Built $(DYLIB)"
+	codesign --remove-signature $(DYLIB) 2>/dev/null || true
+	python3 scripts/realign-linkedit.py $(DYLIB)
+	codesign --force --sign - $(DYLIB)
+	@echo "Built + realigned $(DYLIB)"
 
 install: pam
 	sudo install -d $(PREFIX)
@@ -85,6 +95,14 @@ verify-artifact:
 	@codesign -dvvv $(DYLIB) 2>&1 | grep -E 'Authority|TeamIdentifier|Timestamp|flags=' || true
 	@echo "Note: 'spctl -a -t install' rejecting this dylib is expected and benign — sudo/su"
 	@echo "dlopen() the module and Gatekeeper does not gate that path; 'stapler validate' is N/A."
+
+# Load test: compile an arm64e harness and dlopen the built module, confirming both PAM
+# entry points resolve the way sudo/su load it. Run on the TARGET macOS (this is a load
+# test, not static inspection); the host must allow running a third-party arm64e executable.
+verify-load:
+	cc -arch arm64e -o $(LOADCHECK) scripts/dlopen-check.c
+	$(LOADCHECK) $(DYLIB)
+	@rm -f $(LOADCHECK)
 
 clean:
 	cargo clean

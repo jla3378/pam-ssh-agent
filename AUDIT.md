@@ -179,3 +179,28 @@ in `README.md`); FIX A above — the parsing fix — still applies wherever the 
 `env_keep SSH_AUTH_SOCK`, syslog `AUTHPRIV` routed into the unified logging system, the arm64e
 "preview" ABI requiring nightly + `-Zbuild-std`, and the cdylib linking `libpam.2.dylib` without
 a build script — were verified live earlier in this audit and stand.)
+
+## arm64e module did not load on macOS 26/Tahoe — LINKEDIT string-pool misalignment (fixed)
+
+Found while standing up the first live PAM-stack validation (2026-06, macOS `27.0` build
+`26A5353q`, Apple `ld-1328.2`, nightly `rustc 1.98.0 2026-06-09`).
+
+* **Symptom:** the shippable arm64e dylib produced by `make pam` (`cargo build -Z build-std`)
+  **fails to `dlopen`** with `dyld: mis-aligned LINKEDIT string pool, fileOffset=0x001020DC`.
+  Confirmed in a genuine arm64e process, so it would fail to load into `sudo`/`su` identically —
+  i.e. the module was **non-functional on this OS**, and the v0.10.1 "notarized arm64e build" was
+  evidently signed/notarized but never load-tested.
+* **Isolation:** a trivial `cc -arch arm64e` dylib and system dylibs `dlopen` fine in the same
+  arm64 *and* arm64e test processes, and the **host-arch build loads and resolves both entry
+  points** — so the code and FFI are sound; only the arm64e link is affected.
+* **Root cause:** the linker places the `LC_SYMTAB` string table at `stroff = 1056988`
+  (`0x1020DC`), 4-byte- but not 8-byte-aligned (the indirect symbol table ends on a 4-byte
+  boundary and is not padded). macOS 26/Tahoe dyld now requires 8-byte alignment for the string
+  pool. Ruled out as fixes: re-codesigning, `strip`, `-ld_classic` (ignored by `ld-1328.2`),
+  CommandLineTools vs Xcode-beta (identical linker), `-no_fixup_chains`, and `lld` (cannot link
+  rustc's `symbols.o`).
+* **Fix:** `scripts/realign-linkedit.py`, run by `make pam`, inserts the minimum LINKEDIT
+  padding to 8-align the string table, fixes the affected offsets and the `__LINKEDIT` size, and
+  the dylib is re-signed. `make verify-load` `dlopen`s it in an arm64e process as a build-time
+  gate. The script is idempotent and arch-agnostic, so it becomes a no-op once the toolchain
+  emits an 8-aligned string table. Re-evaluate (and drop) when the Rust/Xcode toolchain is fixed.

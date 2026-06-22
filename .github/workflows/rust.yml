@@ -38,10 +38,17 @@ jobs:
       with:
         key: arm64e-build-std
     - name: Build arm64e PAM module
-      run: rustup run nightly cargo build -Z build-std=std --release --target arm64e-apple-darwin
+      # `make pam` builds with build-std, then realigns the LINKEDIT string table so the
+      # dylib loads on macOS 26+ dyld (see scripts/realign-linkedit.py / AUDIT.md).
+      run: make pam
     - name: Inspect artifact
       run: |
         DY=target/arm64e-apple-darwin/release/libpam_ssh_agent.dylib
         file "$DY"
         otool -L "$DY" | grep -i pam
         nm -gU "$DY" | grep pam_sm
+        # Confirm the realign workaround held: the LC_SYMTAB string table must be 8-aligned
+        # or macOS 26+ dyld will refuse to load the module.
+        stroff=$(otool -l "$DY" | awk '/LC_SYMTAB/{f=1} f&&/stroff/{print $2; exit}')
+        echo "string table offset: $stroff"
+        test $(( stroff % 8 )) -eq 0 || { echo "ERROR: string table mis-aligned"; exit 1; }
