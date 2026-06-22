@@ -139,6 +139,24 @@ mod test {
         Ok(())
     }
 
+    // Characterizes how this module handles a certificate with NO expiry, the limitation
+    // documented in README (RustCrypto/SSH#174). cert_forever.pub is a real OpenSSH "valid
+    // forever" user cert (valid_before = u64::MAX), the same shape a remote agent would
+    // present — so this exercises the production parse+validate path, not the Builder.
+    // ssh-key 0.6.7 still rejects valid_before = u64::MAX (the #175 fix raised the cap only
+    // to i64::MAX, and Builder::new / from_openssh both reject u64::MAX), so from_openssh
+    // fails to parse the forever cert and it never reaches validate_cert. The far-future-
+    // expiry workaround remains necessary. If a future ssh-key bump relaxes this, the
+    // parse will start succeeding and this test will fail loudly, prompting a doc update.
+    #[test]
+    fn test_no_expiry_cert_is_rejected_by_ssh_key() {
+        assert!(
+            Certificate::from_openssh(include_str!(data!("cert_forever.pub"))).is_err(),
+            "ssh-key now parses a no-expiry (valid_before = u64::MAX) cert; \
+             the README cert-expiry limitation can be relaxed"
+        );
+    }
+
     #[test]
     fn test_unknown_critical_field_in_cert() -> Result<()> {
         let cert = Certificate::from_openssh(include_str!(data!("cert_unknown_critical.pub")))?;

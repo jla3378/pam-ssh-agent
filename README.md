@@ -40,6 +40,9 @@ wraps the details:
 make check      # cargo fmt --check, cargo clippy --no-deps, cargo test  (runs on the host arch)
 make pam        # build the arm64e dylib (toolchain overridable via PAM_TOOLCHAIN, default nightly)
 make install    # make pam, then sudo install to /usr/local/lib/pam/pam_ssh_agent.so
+make uninstall  # remove the installed module (does not revert /etc/pam.d wiring)
+make sign       # Developer ID sign the dylib (hardened runtime + secure timestamp)
+make notarize   # sign, then submit to Apple's notary service
 make clean      # cargo clean
 ```
 
@@ -67,6 +70,32 @@ sudo install -d /usr/local/lib/pam
 sudo install -m 0755 target/arm64e-apple-darwin/release/libpam_ssh_agent.dylib \
     /usr/local/lib/pam/pam_ssh_agent.so
 ```
+
+### Signing and notarization (optional — defense-in-depth, not a load requirement)
+
+`make pam` produces an **ad-hoc** (linker-signed) dylib. You can Developer ID sign and notarize it:
+
+```sh
+make sign        # codesign --options runtime --timestamp with your Developer ID identity
+make notarize    # zip + submit to Apple's notary service (waits for the result)
+make verify-artifact   # inspect arch, exports, and signature of the built dylib
+```
+
+What this does and does **not** buy you, for a PAM module on your own machine:
+
+* The module is loaded via `dlopen` by `sudo`/`su`, **not opened by the user**, and Gatekeeper
+  gates `dlopen` only on *quarantined* files. A locally built + `make install`-copied dylib is
+  never quarantined, so signing/notarization is **not** required for it to load. `spctl -a -t
+  install` reporting `rejected` is expected and benign for this artifact.
+* So signing + notarization here is **tamper-evidence, a verifiable authorship chain, and
+  future-proofing** against Apple tightening `dlopen` policy — not a functional prerequisite.
+* A standalone `.dylib` **cannot be stapled** (there is no bundle to hold the ticket), so the
+  notarization is recorded with Apple's notary service but the file itself is not stapled.
+* Signing does **not** substitute for actually validating the module in a live PAM stack — see
+  `LIVE-VALIDATION.md`.
+
+`make sign`/`make notarize` are local-only (they need your Developer ID identity and a one-time
+`xcrun notarytool store-credentials` profile); they are deliberately not run in CI.
 
 ### Wiring it into sudo
 
@@ -155,10 +184,15 @@ be used. A certificate is considered valid if the following conditions are met:
 * The certificate type is specified to "User"
 
 > [!NOTE]
-> Please note that as of now, certificates need to have an expiry time. Once the fix to
-> [this bug](https://github.com/RustCrypto/SSH/issues/174) has made it into a stable release
-> we can relax this requirement but for now just add an expiry time very far into the future if you 
-> want to emulate a certificate without an expiry time.
+> Certificates must have a bounded expiry time. A genuine *no-expiry* certificate — the kind
+> `ssh-keygen` produces by default, or with `-V always:forever`, where the `valid before` field
+> is `0xFFFF…FFFF` (`u64::MAX`) — is **rejected at parse time** by the underlying `ssh-key` crate
+> and will never authenticate. [RustCrypto/SSH#174](https://github.com/RustCrypto/SSH/issues/174)
+> raised the maximum certificate timestamp only to `i64::MAX`, not `u64::MAX`, so the limitation
+> remains. The workaround is to sign the certificate with an explicit, very-far-future expiry
+> (anything below `i64::MAX` seconds, e.g. `-V always:21000101Z`), which parses and validates
+> fine. A regression test (`tests/data/cert_forever.pub` + `test_no_expiry_cert_is_rejected_by_ssh_key`)
+> guards this behavior and will flag if a future `ssh-key` release relaxes it.
 
 Just like with OpenSSH there are two ways to specify a certificate authority key. In the same way as the
 authorized_keys format, a certificate authority key can be specified alongside the regular ssh keys by being

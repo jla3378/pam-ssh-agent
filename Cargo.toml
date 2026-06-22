@@ -34,3 +34,18 @@ base64 = "0.22"
 # this version needs to match the version brought in by ssh-key
 ssh-encoding = "0.2"
 env_logger = "0.11"
+
+[profile.release]
+# panic MUST stay "unwind". Both C entry points (src/openpam.rs / src/lib.rs) wrap
+# their bodies in std::panic::catch_unwind to convert a Rust panic into PAM_AUTH_ERR.
+# With panic = "abort" there is nothing to catch, so any reachable panic would SIGABRT
+# the host process (sudo/su/sshd) mid-authentication instead of failing closed. Do not
+# change this to "abort" to save a few KB — it would silently disable the safety model.
+panic = "unwind"
+# A wraparound in a length/offset/index in any parser (cert, authorized_keys,
+# SSH_AUTH_INFO_0) becomes a checked panic -> caught -> safe auth denial, rather than a
+# silent miscompute. Cheap for a module that runs briefly per authentication.
+overflow-checks = true
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

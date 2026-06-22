@@ -1,0 +1,36 @@
+name: Security audit
+
+# This module gates sudo/su and inherits all of its crypto + SSH-protocol correctness from
+# third-party crates (ssh-key, ssh-agent-client-rs, signature, ssh-encoding, getrandom). Scan
+# the dependency tree against the RustSec advisory database so a published advisory against any
+# of them is surfaced rather than shipping silently. Lighter than cargo-deny on purpose: this is
+# a personal, own-machine module, so license/source/ban policy is out of scope.
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+  schedule:
+    # Weekly, so advisories published after the last push are still caught.
+    - cron: "27 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

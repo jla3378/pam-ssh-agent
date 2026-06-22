@@ -13,9 +13,11 @@ static LOG_LOCK: Mutex<bool> = Mutex::new(false);
 /// was done in pam_ssh_agent_auth. If this method is called multiple times, subsequent
 /// calls will not have any effect.
 pub fn init_logging(pam_service: String) -> anyhow::Result<()> {
-    let mut guard = LOG_LOCK
-        .lock()
-        .expect("Another call to this method panicked");
+    // Recover from a poisoned lock instead of panicking: logging is best-effort and
+    // must never deny authentication (mirrors the stderr fallback in src/lib.rs when
+    // init fails). A panic here would be caught by catch_unwind and fail closed, but
+    // it would also destroy the diagnostics we depend on during a real auth.
+    let mut guard = LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if *guard {
         // we have already initialized logging
         return Ok(());
@@ -93,7 +95,8 @@ impl Log for PrefixWrappingLogger {
 
     fn log(&self, record: &Record) {
         let message = record.args();
-        let mut logger = self.logger.lock().unwrap();
+        // Best-effort logging must never panic the auth path; recover a poisoned lock.
+        let mut logger = self.logger.lock().unwrap_or_else(|e| e.into_inner());
         match record.level() {
             Level::Error => logger.err(message),
             Level::Warn => logger.warning(message),
@@ -104,6 +107,11 @@ impl Log for PrefixWrappingLogger {
     }
 
     fn flush(&self) {
-        let _ = self.logger.lock().unwrap().backend.flush();
+        let _ = self
+            .logger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .backend
+            .flush();
     }
 }
