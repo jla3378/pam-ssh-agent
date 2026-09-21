@@ -126,6 +126,14 @@ The installed headers supply the constants and signatures:
 `MacOSX27.0.sdk/usr/include/security/pam_constants.h`, `pam_modules.h`, and `pam_appl.h`.
 The developer directory is `/Applications/Xcode.app/Contents/Developer`.
 The toolchain is Xcode 27.0 (27A266a), macOS SDK 27.0, arm64-apple-darwin.
+[Apple XNU `kern_prot.c`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_prot.c)
+and [`kern_credential.c`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_credential.c)
+show that `setgroups(0, NULL)` disables the external group resolver and that the following `setgid` sets the only
+credential group to the target GID. [Apple `id.c`](https://github.com/apple-oss-distributions/shell_cmds/blob/main/id/id.c)
+shows that `id -G` uses `getgrouplist_2` for the current account. The SDK maps modern `getgroups` callers to the
+extended symbol. [Apple Libc `getgroups.c`](https://github.com/apple-oss-distributions/Libc/blob/main/sys/getgroups.c)
+shows that this symbol also resolves the account group list. The root-only test dynamically resolves the unversioned
+`getgroups` symbol when it checks the stored child credential list on macOS.
 The live `/etc/pam.d/sudo` supplies the observed fallback order.
 On 2026-09-21, Apple sudo loaded the generation 49 public-source module and a fresh trusted-key test returned UID 0.
 Absent-socket, untrusted-key, and denied-signing tests returned UID 0 through Apple fallback.

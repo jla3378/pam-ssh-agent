@@ -390,10 +390,47 @@ mod tests {
     #[ignore]
     #[test]
     fn test_run_with_effective_uid() -> Result<()> {
-        let result = run(&["/usr/bin/id"], TIMEOUT, get_uid("nobody")?, None)?;
-        assert!(result.contains("nobody"));
-        let groups = run(&["/usr/bin/id", "-G"], TIMEOUT, get_uid("nobody")?, None)?;
-        assert_eq!(groups.split_whitespace().count(), 1);
+        let uid = get_uid("nobody")?;
+        let gid = super::default_low_privilege_gid()?;
+        assert_eq!(
+            run(&["/usr/bin/id", "-u"], TIMEOUT, uid, None)?,
+            uid.to_string()
+        );
+        assert_eq!(
+            run(&["/usr/bin/id", "-g"], TIMEOUT, uid, None)?,
+            gid.to_string()
+        );
+
+        #[cfg(target_os = "macos")]
+        {
+            let probe = r#"import ctypes
+import os
+libc = ctypes.CDLL(None, use_errno=True)
+getgroups = libc.getgroups
+getgroups.argtypes = (ctypes.c_int, ctypes.POINTER(ctypes.c_uint32))
+getgroups.restype = ctypes.c_int
+count = getgroups(0, None)
+if count < 0:
+    raise OSError(ctypes.get_errno(), "getgroups")
+groups = (ctypes.c_uint32 * count)()
+if getgroups(count, groups) != count:
+    raise OSError(ctypes.get_errno(), "getgroups")
+try:
+    os.setuid(0)
+except PermissionError:
+    pass
+else:
+    raise RuntimeError("child regained root")
+print(*groups)"#;
+            let groups = run(&["/usr/bin/python3", "-c", probe], TIMEOUT, uid, None)?;
+            assert_eq!(groups, gid.to_string());
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let groups = run(&["/usr/bin/id", "-G"], TIMEOUT, uid, None)?;
+            assert_eq!(groups.split_whitespace().count(), 1);
+        }
         Ok(())
     }
 }
