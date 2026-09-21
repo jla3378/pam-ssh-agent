@@ -18,7 +18,7 @@ macro_rules! get_item {
         fn $name(&self) -> Result<String> {
             let service = self
                 .get_item::<$type>()
-                .unwrap()
+                .map_err(|error| anyhow!("Could not get_item {}: {error:?}", stringify!($type)))?
                 .ok_or(anyhow!("Could not get_item {}", stringify!($type)))?;
             Ok(from_utf8(service.0.to_bytes())?.to_string())
         }

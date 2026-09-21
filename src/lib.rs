@@ -77,7 +77,7 @@ impl PamHooks for PamSshAgent {
 }
 
 fn run(args: Vec<&CStr>, pam_handle: &PamHandle) -> Result<()> {
-    init_logging(pam_handle.get_service().unwrap_or("unknown".into()))?;
+    init_logging(pam_handle.get_service()?)?;
     let args = Args::parse(args, &UnixEnvironment, pam_handle)?;
     if args.debug {
         log::set_max_level(log::LevelFilter::Debug);
@@ -92,7 +92,7 @@ fn do_authenticate(args: &Args, handle: &PamHandle) -> Result<()> {
 
     info!("Authenticating user '{calling_user}' using ssh-agent at '{path}'");
     if Path::new(&args.file).exists() {
-        info!("authorized keys from '{}'", &args.file);
+        info!("authorized keys from '{}'", args.file);
     }
     if let Some(ca_keys_file) = &args.ca_keys_file {
         info!("ca_keys from '{ca_keys_file}'");

@@ -6,9 +6,16 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
-// RedHat and Debian derived distributions have different names for the least privilege group,
-// but the numeric value seems to be the same, derived from /proc/sys/fs/overflowgid
-const DEFAULT_LOW_PRIVILEGE_GID: u32 = 65534;
+fn default_low_privilege_gid() -> Result<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        uzers::get_group_by_name("nobody")
+            .map(|group| group.gid())
+            .ok_or_else(|| anyhow!("Could not find the nobody group"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(65534)
+}
 
 /// Invoke the specified command. If the command does not finish after the specified
 /// timeout duration, Err is returned, else the content of stdout from the command is
@@ -21,7 +28,10 @@ pub fn run(
 ) -> Result<String> {
     let mut cmd = Command::new(command[0]);
 
-    let gid = effective_gid.unwrap_or(DEFAULT_LOW_PRIVILEGE_GID);
+    let gid = match effective_gid {
+        Some(gid) => gid,
+        None => default_low_privilege_gid()?,
+    };
 
     cmd.args(&command[1..])
         .stdout(Stdio::piped())
@@ -85,6 +95,15 @@ mod tests {
     use uzers::{get_current_gid, get_current_uid};
 
     static TIMEOUT: Duration = Duration::from_secs(2);
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn default_group_matches_directory() {
+        assert_eq!(
+            super::default_low_privilege_gid().unwrap(),
+            uzers::get_group_by_name("nobody").unwrap().gid()
+        );
+    }
 
     #[test]
     fn test_run() -> Result<()> {
