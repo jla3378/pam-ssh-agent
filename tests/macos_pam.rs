@@ -1,5 +1,7 @@
 #![cfg(target_os = "macos")]
 
+mod common;
+
 use pam::constants::{PAM_ESTABLISH_CRED, PamResultCode};
 use pam::items::{ItemType, Service, User};
 use pam::module::PamHandle;
@@ -39,7 +41,7 @@ fn serve(listener: UnixListener, mode: &str) {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let key = PrivateKey::from_openssh(include_str!("data/id_ed25519")).unwrap();
+    let key = PrivateKey::from_openssh(common::private_key("id_ed25519")).unwrap();
     let mut length = [0; 4];
     while stream.read_exact(&mut length).is_ok() {
         let mut request = vec![0; u32::from_be_bytes(length) as usize];

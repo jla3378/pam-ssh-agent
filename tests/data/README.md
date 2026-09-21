@@ -5,6 +5,10 @@ $ ssh-keygen -t ed25519 -f ca_key -N "" -C test-ca-key
 $ ssh-keygen -t ed25519 -f cert_key -N "" -C test-cert-key
 $ ssh-keygen -s ca_key -I identity -n principal -V 20250701Z:20250801Z cert_key.pub
 $ mv cert_key-cert.pub cert.pub
+
+The private-key files contain only the base64 body. Test code adds the OpenSSH
+private-key header and footer before parsing them. This keeps private-key
+markers out of tracked fixtures while preserving the test keys.
 ```
 
 cert_unknown_critical.pub is copied from 

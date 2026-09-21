@@ -1,3 +1,5 @@
+mod common;
+
 use pam_ssh_agent::filter::IdentityFilter;
 use pam_ssh_agent::{SSHAgent, authenticate};
 use signature::Signer;
@@ -13,12 +15,12 @@ struct DummySshAgent {
 // with a Yubikey 5c
 const PUBLIC_SK_KEY: &str = include_str!("data/test_ed25519_sk.pub");
 
-const PRIVATE_KEY: &str = include_str!("data/id_ed25519");
 const PUBLIC_KEY: &str = include_str!("data/id_ed25519.pub");
 
 impl DummySshAgent {
     fn new() -> DummySshAgent {
-        let key = PrivateKey::from_openssh(PRIVATE_KEY).expect("Failed to parse test key");
+        let key = PrivateKey::from_openssh(common::private_key("id_ed25519"))
+            .expect("Failed to parse test key");
 
         DummySshAgent { key }
     }

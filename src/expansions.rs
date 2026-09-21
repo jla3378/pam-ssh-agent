@@ -76,15 +76,15 @@ mod tests {
     fn test_find_homedir() -> Result<()> {
         let result = expand_homedir("/foo/bar".into(), |s| {
             assert_eq!(s, "");
-            Ok("/home/noa".into())
+            Ok("/tmp/noa".into())
         })?;
         assert_eq!(result, "/foo/bar");
 
         let result = expand_homedir("~/.file".into(), |s| {
             assert_eq!(s, "");
-            Ok("/home/noa".into())
+            Ok("/tmp/noa".into())
         })?;
-        assert_eq!(result, "/home/noa/.file");
+        assert_eq!(result, "/tmp/noa/.file");
 
         let result = expand_homedir("~bob/.file".into(), |s| {
             assert_eq!(s, "bob");

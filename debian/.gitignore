@@ -1,5 +1,0 @@
-.debhelper/
-debhelper-build-stamp
-files
-pam-ssh-agent.substvars
-pam-ssh-agent/

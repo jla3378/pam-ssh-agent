@@ -17,6 +17,19 @@ use uzers::uid_t;
 
 pub(crate) const CERT_STR: &str = include_str!(data!("cert.pub"));
 
+pub(crate) fn private_key(name: &str) -> String {
+    let body = match name {
+        "cert_key" => include_str!(data!("cert_key")),
+        "ca_key" => include_str!(data!("ca_key")),
+        "id_ed25519" => include_str!(data!("id_ed25519")),
+        _ => panic!("unknown test key"),
+    };
+    format!(
+        "-----BEGIN OPENSSH {kind} KEY-----\n{body}-----END OPENSSH {kind} KEY-----\n",
+        kind = "PRIVATE"
+    )
+}
+
 macro_rules! canned {
     ($name:ident) => {
         pub struct $name {

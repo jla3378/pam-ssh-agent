@@ -1,7 +1,0 @@
-/target/
-/.idea/
-/vendor/*
-!/vendor/pam-bindings/
-/vendor/pam-bindings/target/
-/vendor/pam-bindings/Cargo.lock
-/debian/cargo_home/

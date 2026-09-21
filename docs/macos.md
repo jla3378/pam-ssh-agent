@@ -4,6 +4,18 @@ This module supports Apple OpenPAM on arm64 macOS.
 Use the default Rust crypto implementation.
 The module reads the current `SSH_AUTH_SOCK`.
 
+For a privileged sudo deployment, use the strict profile and an explicit per-user trust file:
+
+```text
+auth sufficient /nix/store/…-pam-ssh-agent-…/lib/security/pam_ssh_agent.so strict agent_timeout=30 file=/etc/security/pam-ssh-agent/%u
+```
+
+Strict mode disables the legacy `sshd` environment shortcut unless `sshd_shortcut` is explicitly added. It rejects
+home-expanded trust paths, dynamic helper paths, unsupported authorized-keys options, and trust files that are not
+root-controlled. A helper executable must also be root-controlled. The helper environment, output limit, process-group
+cleanup, and deadline are bounded as described in the main README. A strict helper must run as a non-root account and
+cannot create child processes.
+
 ## Build and inspect
 
 Run these commands from the source directory:
@@ -13,11 +25,15 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo build --locked --release
+cargo bench --bench per_request --locked
 xcrun nm -gU target/release/libpam_ssh_agent.dylib
 xcrun otool -L target/release/libpam_ssh_agent.dylib
 codesign --verify --strict target/release/libpam_ssh_agent.dylib
 codesign -dv --verbose=4 target/release/libpam_ssh_agent.dylib
 ```
+
+The benchmark reports policy-path p50, p95, and p99 values. It does not cache filters between requests, report
+allocations or resident memory, or replace a live agent test.
 
 The tests compile SDK constants and use real PAM handles.
 The agent fixture uses a public test key and tests successful, untrusted, and denied signatures.
@@ -35,7 +51,7 @@ Keep this order:
 
 ```text
 auth optional /nix/store/…-pam_reattach-…/lib/pam/pam_reattach.so
-auth sufficient /nix/store/…-pam-ssh-agent-…/lib/security/pam_ssh_agent.so file=/etc/security/pam-ssh-agent/%u
+auth sufficient /nix/store/…-pam-ssh-agent-…/lib/security/pam_ssh_agent.so strict agent_timeout=30 file=/etc/security/pam-ssh-agent/%u
 auth sufficient pam_tid.so
 ```
 
@@ -83,6 +99,12 @@ Test fallback with an absent socket, an untrusted key, and a denied signing requ
 Confirm a fresh Touch ID or password authentication after each failure.
 The unprivileged PAM tests do not prove Apple's sudo can load the installed module.
 
+Inspect the generated configuration before activation. Confirm the module path is an immutable Nix store path, the
+strict option and timeout are present, and the selected key file contains only the fingerprint you approved. Keep the
+existing `pam_reattach` line before this module and `pam_tid.so` after it. A successful trusted-key attempt should stop
+at the sufficient module; an absent socket, untrusted key, or denied signing request must continue to Apple's Touch ID
+and password fallback.
+
 ## Roll back
 
 Record the previous `/nix/var/nix/profiles/system-<number>-link` before activation.
@@ -90,6 +112,12 @@ Use the installed `darwin-rebuild --rollback` command after approval.
 Compare `/etc/pam.d/sudo_local` with the previous generation.
 Confirm a fresh Touch ID or password authentication.
 Rebuild and activate the desired configuration when rollback validation is complete.
+
+Record the active generation and the result of `csrutil status` in the handoff. The xctrace command-line workflow for
+capturing per-request profiles is unverified because the Xcode documentation source gate was unavailable. The installed
+toolchain used for this work is Xcode 27.0 (27A266a) with macOS SDK 27.0. If profiling is needed, first capture a
+non-privileged baseline with the installed Instruments or xctrace tools and record the exact command and output before
+using it to guide changes.
 
 ## Source evidence
 
@@ -99,8 +127,9 @@ The installed headers supply the constants and signatures:
 The developer directory is `/Applications/Xcode.app/Contents/Developer`.
 The toolchain is Xcode 27.0 (27A266a), macOS SDK 27.0, arm64-apple-darwin.
 The live `/etc/pam.d/sudo` supplies the observed fallback order.
-On 2026-09-20, Apple sudo loaded the installed module and a fresh trusted-key test returned UID 0.
+On 2026-09-21, Apple sudo loaded the generation 49 public-source module and a fresh trusted-key test returned UID 0.
 Absent-socket, untrusted-key, and denied-signing tests returned UID 0 through Apple fallback.
 Rollback to generation 47 removed the SSH configuration and preserved fallback authentication.
 Reactivation of generation 48 restored the module, selected key, and sudoers declaration.
-SIP reports enabled after reactivation.
+Generation 49 uses the module built from public commit `PUBLIC_SOURCE_COMMIT` and is the active system generation.
+SIP reports enabled after generation 49 activation.
