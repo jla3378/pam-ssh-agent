@@ -5,6 +5,10 @@ use ssh_key::Signature;
 pub trait SSHAgent {
     fn list_identities(&mut self) -> Result<Vec<Identity<'static>>>;
     fn sign<'a>(&mut self, key: impl Into<Identity<'a>>, data: &[u8]) -> Result<Signature>;
+
+    fn sign_with_ref(&mut self, key: &Identity, data: &[u8]) -> Result<Signature> {
+        self.sign(key.clone(), data)
+    }
 }
 
 impl SSHAgent for Client {
@@ -13,5 +17,9 @@ impl SSHAgent for Client {
     }
     fn sign<'a>(&mut self, key: impl Into<Identity<'a>>, data: &[u8]) -> Result<Signature> {
         self.sign(key, data)
+    }
+
+    fn sign_with_ref(&mut self, key: &Identity, data: &[u8]) -> Result<Signature> {
+        self.sign_with_ref(key, data)
     }
 }

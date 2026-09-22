@@ -25,6 +25,8 @@ libraries directly is intended to make it easier to ensure that implementation i
 addressed in a timely manner. A secondary benefit is that it is easier to support the full of algorithms that OpenSSH
 supports.
 
+See [the dependency security review](docs/security.md) for the current locked versions, advisory status, and review triggers.
+
 ## Installation and packaging
 
 Getting this software packaged and integrated into upstream Linux distributions is an active goal of this project,
@@ -92,6 +94,26 @@ configuration file in `/etc/pam.d`. pam_ssh_agent currently understands the foll
   will be executed as. If not specified, the command will be run as the requesting user.
 * `default_ssh_auth_sock=/path/to/ssh_agent_unix_socket` the path to use if the `SSH_AUTH_SOCK` environment variable
   is not set.
+* `strict` enable the deployment profile for privileged local use. It requires a per-user `file` path containing `%u`,
+  rejects home-expanded trust paths and dynamic helper paths, requires a root-controlled absolute helper executable,
+  validates the trust file and helper output, clears inherited helper groups and environment, and bounds helper output
+  and execution time.
+* `sshd_shortcut` explicitly enable the `SSH_AUTH_INFO_0` shortcut. It is disabled by `strict` unless this option is
+  present.
+* `agent_timeout=SECONDS` bound the complete SSH-agent connection and request. Values range from 1 to 300 seconds.
+  `strict` uses 30 seconds by default. The timeout includes connection, identity listing, signing, and response reads.
+
+The strict profile is intended for a root-controlled sudo or equivalent PAM configuration. Its trusted file must be a
+regular root-owned file with root-owned path components and no group or world write permission. The active macOS configuration uses
+`file=/etc/security/pam-ssh-agent/%u`, so each PAM user has an explicitly selected public key. Do not populate this file
+from every identity visible in an agent. Strict authorized-keys files accept bare public keys and `cert-authority`
+entries; policy options are rejected so their meaning cannot be silently broadened.
+
+An authorized-keys helper is always invoked through an absolute path with an empty environment plus `LANG=C`,
+`LC_ALL=C`, and `PATH=/usr/bin:/bin`. Its stdout and stderr are capped at 1 MiB each. The process runs with the
+requested uid, the `nobody` group on macOS when no group is supplied, no supplementary groups when the PAM process is
+root, and its process group is killed and reaped on timeout. Strict mode requires a non-root helper account and prevents
+the helper from creating child processes. The helper timeout is 10 seconds.
 
 ## SSH Certificates
 
@@ -131,7 +153,7 @@ upgrade path from `pam_ssh_agent_auth` smoother as the previous functionality is
 
 * `~` same as in shells, without specifying a username this expands to the home directory referred to by `PAM_USER`, 
   normally the user attempting to authenticate. If a username is specified, the home directory of that user will be
-  used such that `~alice` might expand to `/home/alice`.
+  used such that `~alice` might expand to `/tmp/alice`.
 * `%h` same as `~`, the home directory of the user referred to by the PAM item `PAM_USER`.
 * `%H` the value returned by `gethostname(3)`, truncated after the first period such that if `gethostname(3)` returns
   `host.example.com` this `%H` will turn into `host`.
@@ -164,6 +186,19 @@ to implement the option to use OpenSSL instead of the ssh-key crypto implementat
 
 Unless you are someone that has a mandate to only run FIPS validated crypto implementations, you probably don't want
 this feature enabled.
+
+## Measuring request cost
+
+Run the standalone request harness with:
+
+```sh
+cargo bench --bench per_request --locked
+```
+
+It reports p50, p95, and p99 for fresh policy loading and in-process authentication. The authentication cases use one
+matching identity and three unmatched identities followed by the match. They include identity selection, random
+challenge generation, fixture-backed signing, and signature verification. The harness does not add a cross-request
+cache. It excludes Unix-socket IPC, a real or hardware-backed agent, allocations, and resident memory.
 
 ## License
 

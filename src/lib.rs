@@ -1,4 +1,5 @@
 mod agent;
+mod agent_connection;
 mod args;
 mod auth;
 mod cmd;
@@ -17,20 +18,19 @@ pub use crate::agent::SSHAgent;
 pub use crate::auth::authenticate;
 use pam::constants::{PamFlag, PamResultCode};
 use pam::module::{PamHandle, PamHooks};
-use std::env;
-use std::env::VarError;
+use std::env::{self, VarError};
 
 use crate::environment::{Environment, UnixEnvironment};
 use crate::filter::IdentityFilter;
-use crate::logging::init_logging;
+use crate::logging::{init_logging, with_debug};
 use crate::pamext::PamHandleExt;
 use anyhow::{Context, Result, anyhow};
 use args::Args;
 use log::{debug, error, info};
-use ssh_agent_client_rs::Client;
 use ssh_key::PublicKey;
 use std::ffi::CStr;
 use std::path::Path;
+use uzers::get_user_by_name;
 
 struct PamSshAgent;
 pam::pam_hooks!(PamSshAgent);
@@ -56,9 +56,7 @@ impl PamHooks for PamSshAgent {
                 PamResultCode::PAM_SUCCESS
             }
             Err(err) => {
-                for line in format!("{err:?}").split('\n') {
-                    error!("{line}")
-                }
+                error!("{err:?}");
                 debug!("Failed call to sm_authenticate(), returning PAM_AUTH_ERR");
                 PamResultCode::PAM_AUTH_ERR
             }
@@ -77,23 +75,26 @@ impl PamHooks for PamSshAgent {
 }
 
 fn run(args: Vec<&CStr>, pam_handle: &PamHandle) -> Result<()> {
-    init_logging(pam_handle.get_service().unwrap_or("unknown".into()))?;
-    let args = Args::parse(args, &UnixEnvironment, pam_handle)?;
-    if args.debug {
-        log::set_max_level(log::LevelFilter::Debug);
+    let context = PamContext::new(pam_handle)?;
+    init_logging(context.service.clone())?;
+    let args = Args::parse(args, &UnixEnvironment, &context)?;
+    if args.strict {
+        let calling_uid = validate_strict_user(&context.calling_user)?;
+        if args.authorized_keys_command.is_some() {
+            let helper_uid = if let Some(user) = &args.authorized_keys_command_user {
+                validate_strict_user(user)?
+            } else {
+                calling_uid
+            };
+            if helper_uid == 0 {
+                return Err(anyhow!("strict mode requires a non-root helper user"));
+            }
+        }
     }
-    do_authenticate(&args, pam_handle)?;
-    Ok(())
+    with_debug(args.debug, || do_authenticate(&args, &context))
 }
 
-fn do_authenticate(args: &Args, handle: &PamHandle) -> Result<()> {
-    let path = get_path(args)?;
-    let calling_user = handle.get_calling_user()?;
-
-    info!("Authenticating user '{calling_user}' using ssh-agent at '{path}'");
-    if Path::new(&args.file).exists() {
-        info!("authorized keys from '{}'", &args.file);
-    }
+fn do_authenticate(args: &Args, context: &PamContext) -> Result<()> {
     if let Some(ca_keys_file) = &args.ca_keys_file {
         info!("ca_keys from '{ca_keys_file}'");
     };
@@ -101,23 +102,81 @@ fn do_authenticate(args: &Args, handle: &PamHandle) -> Result<()> {
         info!("Invoking command '{authorized_keys_command}' to obtain keys");
     }
 
-    let ssh_agent_client = Client::connect(Path::new(path.as_str()))?;
-
-    let filter = IdentityFilter::new(
-        Path::new(args.file.as_str()),
-        args.ca_keys_file.as_deref().map(Path::new),
-        args.authorized_keys_command.as_deref(),
-        args.authorized_keys_command_user.as_deref(),
-        &calling_user,
-    )?;
-
-    if check_sshd_special_case(handle.get_service().ok(), &filter, UnixEnvironment)? {
+    let filter = if args.strict {
+        IdentityFilter::new_strict(
+            Path::new(args.file.as_str()),
+            args.ca_keys_file.as_deref().map(Path::new),
+            args.authorized_keys_command.as_deref(),
+            args.authorized_keys_command_user.as_deref(),
+            &context.calling_user,
+        )?
+    } else {
+        IdentityFilter::new(
+            Path::new(args.file.as_str()),
+            args.ca_keys_file.as_deref().map(Path::new),
+            args.authorized_keys_command.as_deref(),
+            args.authorized_keys_command_user.as_deref(),
+            &context.calling_user,
+        )?
+    };
+    if args.sshd_shortcut
+        && check_sshd_special_case(Some(context.service.clone()), &filter, UnixEnvironment)?
+    {
         return Ok(());
     }
-    match authenticate(&filter, ssh_agent_client, &handle.get_calling_user()?)? {
+    let path = get_path(args)?;
+    info!(
+        "Authenticating user '{}' using ssh-agent at '{path}'",
+        context.calling_user
+    );
+    info!("authorized keys from '{}'", args.file);
+    let ssh_agent_client = agent_connection::connect(Path::new(&path), args.agent_timeout)?;
+    match authenticate(&filter, ssh_agent_client, &context.calling_user)? {
         true => Ok(()),
         false => Err(anyhow!("Agent did not know of any of the allowed keys")),
     }
+}
+
+struct PamContext {
+    calling_user: String,
+    service: String,
+}
+
+impl PamContext {
+    fn new(handle: &dyn PamHandleExt) -> Result<Self> {
+        Ok(Self {
+            calling_user: handle.get_calling_user()?,
+            service: handle.get_service()?,
+        })
+    }
+}
+
+impl PamHandleExt for PamContext {
+    fn get_calling_user(&self) -> Result<String> {
+        Ok(self.calling_user.clone())
+    }
+
+    fn get_service(&self) -> Result<String> {
+        Ok(self.service.clone())
+    }
+}
+
+fn validate_strict_user(name: &str) -> Result<u32> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(anyhow!("strict mode requires a plain local user name"));
+    }
+    let user = get_user_by_name(name)
+        .ok_or_else(|| anyhow!("strict mode could not resolve local user '{name}'"))?;
+    if user.name().to_string_lossy() != name {
+        return Err(anyhow!(
+            "strict mode user name does not match the local account"
+        ));
+    }
+    Ok(user.uid())
 }
 
 /// Returns true if SSH_SERVICE is sshd, and the environment variable SSH_AUTH_INFO_0 is set
@@ -165,9 +224,9 @@ fn get_path(args: &Args) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::check_sshd_special_case;
     use crate::filter::IdentityFilter;
     use crate::test::{CannedEnv, DummyEnv, data};
+    use crate::{check_sshd_special_case, validate_strict_user};
     use anyhow::Result;
     use std::path::Path;
 
@@ -211,5 +270,15 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn strict_user_is_local_and_path_safe() {
+        for name in ["", "../root", "user/name", "user\nname", ".", "usér"] {
+            assert!(validate_strict_user(name).is_err(), "{name:?}");
+        }
+        assert!(validate_strict_user("codex-account-that-does-not-exist").is_err());
+        let current = uzers::get_current_username().expect("current user");
+        assert!(validate_strict_user(&current.to_string_lossy()).is_ok());
     }
 }

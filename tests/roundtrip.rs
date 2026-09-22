@@ -1,3 +1,5 @@
+mod common;
+
 use pam_ssh_agent::filter::IdentityFilter;
 use pam_ssh_agent::{SSHAgent, authenticate};
 use signature::Signer;
@@ -9,11 +11,10 @@ struct DummySshAgent {
     key: PrivateKey,
 }
 
-const PRIVATE_KEY: &str = include_str!("data/id_ed25519");
-
 impl DummySshAgent {
     fn new() -> DummySshAgent {
-        let key = PrivateKey::from_openssh(PRIVATE_KEY).expect("Failed to parse test key");
+        let key = PrivateKey::from_openssh(common::private_key("id_ed25519"))
+            .expect("Failed to parse test key");
         DummySshAgent { key }
     }
 }
