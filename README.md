@@ -189,17 +189,16 @@ this feature enabled.
 
 ## Measuring request cost
 
-Run the dependency-free policy-path harness with:
+Run the standalone request harness with:
 
 ```sh
 cargo bench --bench per_request --locked
 ```
 
-It performs each request from a fresh `IdentityFilter` construction and reports p50, p95, and p99 elapsed time. The
-harness does not add a cross-request cache; use it to compare changes to parsing and trust-file validation on the same
-machine. It measures policy loading rather than a live agent signature, so live-agent latency must be measured during a
-controlled sudo test.
-The harness does not report allocations or resident memory.
+It reports p50, p95, and p99 for fresh policy loading and in-process authentication. The authentication cases use one
+matching identity and three unmatched identities followed by the match. They include identity selection, random
+challenge generation, fixture-backed signing, and signature verification. The harness does not add a cross-request
+cache. It excludes Unix-socket IPC, a real or hardware-backed agent, allocations, and resident memory.
 
 ## License
 
