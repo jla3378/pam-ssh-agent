@@ -1,0 +1,182 @@
+# Selected macOS production support profile. Live qualification is incomplete.
+schema_version = 1
+profile_id = "macos-27-arm64-sudo-strict"
+status = "selected-not-qualified"
+contract = "docs/macos-support.md"
+
+[host]
+os_version = "27.0"
+os_build = "26A428"
+architecture = "arm64"
+hardware_model = "Mac16,8"
+chip = "Apple M4 Pro"
+sip_required = true
+pam_host = "/usr/bin/sudo"
+pam_service = "sudo"
+invoker = "non-root-local-account"
+sudo_target = "root"
+
+[toolchain]
+xcode_version = "27.0"
+xcode_build = "27A266a"
+sdk_version = "27.0"
+sdk_build = "26A425"
+developer_dir = "/Applications/Xcode.app/Contents/Developer"
+sdk_root = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk"
+clang_version = "21.0.0"
+clang_build = "clang-2100.3.34.2"
+rust_toolchain = "1.96.1-aarch64-apple-darwin"
+package_rust_version = "1.88"
+stable_components = ["rustc", "cargo", "rust-std", "rustfmt", "clippy"]
+stable_targets = ["aarch64-apple-darwin"]
+rustc_commit = "31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd"
+rustc_commit_date = "2026-06-26"
+cargo_version = "1.96.1"
+cargo_commit = "356927216a2d746168cf76e5e88cc3f4b58e029d"
+cargo_commit_date = "2026-06-26"
+nightly_reference = "nightly-2026-06-10-aarch64-apple-darwin"
+nightly_rust = "1.98.0-nightly"
+nightly_rustc_commit = "beae781308e9ddef13074a03faf57ca2fac59a5b"
+nightly_cargo = "1.98.0-nightly"
+nightly_cargo_commit = "0b1123a48825309b697312b44fdb64b3df00c958"
+nightly_components = ["rustc", "cargo", "rust-std", "rust-src", "llvm-tools"]
+nightly_targets = ["aarch64-apple-darwin"]
+nightly_status = "excluded-profile-reference"
+lockfile_sha256 = "2b004e7cc3eccb925a8f4a4bf174ef80e94825b4b0db30ecaf4e4a16581429d5"
+
+[build]
+profile = "release"
+target = "aarch64-apple-darwin"
+features = []
+default_features = false
+crypto = "default-rust"
+panic = "unwind"
+minimum_macos = "27.0"
+target_directory = "target/macos-27"
+artifact_filename = "libpam_ssh_agent.dylib"
+installed_filename = "pam_ssh_agent.so"
+install_name = "pam_ssh_agent.so"
+target_rustflags = [
+  "-C",
+  "link-arg=-mmacosx-version-min=27.0",
+  "-C",
+  "link-arg=-Wl,-install_name,pam_ssh_agent.so",
+]
+unset_environment = [
+  "MACOSX_DEPLOYMENT_TARGET",
+  "RUSTFLAGS",
+  "CARGO_ENCODED_RUSTFLAGS",
+  "CARGO_BUILD_RUSTFLAGS",
+  "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
+  "RUSTC_WRAPPER",
+  "RUSTC_WORKSPACE_WRAPPER",
+]
+command_status = "verified"
+command = '''release_rustc=$(rustup which --toolchain 1.96.1-aarch64-apple-darwin rustc); env -u MACOSX_DEPLOYMENT_TARGET -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS -u CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk CARGO_TARGET_DIR=target/macos-27 RUSTC="$release_rustc" rustup run 1.96.1-aarch64-apple-darwin cargo build --locked --release --no-default-features --target aarch64-apple-darwin --config 'target.aarch64-apple-darwin.rustflags=["-C","link-arg=-mmacosx-version-min=27.0","-C","link-arg=-Wl,-install_name,pam_ssh_agent.so"]' '''
+
+[pam]
+mode = "strict"
+module_position = "sufficient"
+agent_timeout_seconds = 30
+socket_source = "SSH_AUTH_SOCK"
+allow_default_ssh_auth_sock = false
+preserve_environment = ["SSH_AUTH_SOCK"]
+file_template = "/etc/security/pam-ssh-agent/%u"
+module_line = "auth sufficient /absolute/package/path/lib/security/pam_ssh_agent.so strict agent_timeout=30 file=/etc/security/pam-ssh-agent/%u"
+fallback_order = ["touch-id", "password"]
+
+[agent]
+implementation = "/usr/bin/ssh-agent"
+implementation_version = "unverified"
+observed_openssh_suite = "10.3p1"
+local_software_agent = true
+forwarded_agent = false
+
+[trust]
+key_count_per_user = 1
+key_format = "bare-openssh"
+algorithm = "ssh-ed25519"
+selection = "sha256-fingerprint"
+file_owner_uid = 0
+file_mode = "0600"
+directory_owner_uid = 0
+directory_write_policy = "owner-only"
+
+[account]
+pam_user = "invoking-local-account"
+rename_requires_reenrollment = true
+delete_requires_trust_file_removal = true
+same_name_reuse_requires_fresh_enrollment = true
+root_invoker = "excluded"
+alternate_sudo_target = "excluded"
+
+[requirements]
+requires_agent_signature = true
+claims_fresh_user_presence = false
+touch_id_fallback = true
+password_fallback = true
+fresh_sudo_credentials = true
+
+[compatibility]
+build_architecture = "arm64"
+runtime_hardware = "Mac16,8; Apple M4 Pro"
+other_arm64_hardware = "unverified"
+
+[excluded]
+profiles = [
+  "legacy",
+  "sshd-shortcut",
+  "default-ssh-auth-sock",
+  "helper",
+  "certificate-authority",
+  "security-key-policy",
+  "rsa",
+  "ecdsa",
+  "security-key",
+  "forwarded-agent",
+  "other-agent-products",
+  "root-invoker",
+  "alternate-sudo-target",
+  "arm64e",
+  "arm64e.x1",
+  "enhanced-security-runtime",
+  "non-sudo-pam-host",
+  "gui-login",
+  "screen-unlock",
+  "remote-ssh-acceptance",
+]
+
+[evidence]
+status_vocabulary = [
+  "specified",
+  "verified",
+  "reproduced",
+  "historical",
+  "unverified",
+  "unsupported",
+  "blocked",
+  "not-applicable",
+]
+types = [
+  "build",
+  "inspection",
+  "direct-hook",
+  "dynamic-loader",
+  "sudo",
+  "fallback",
+  "fault",
+  "performance",
+]
+
+[qualification]
+host_and_sip = "verified"
+build = "verified"
+artifact_inspection = "verified"
+direct_hook = "verified"
+dynamic_loader = "unverified"
+trusted_key_success = "unverified"
+fallback = "unverified"
+rollback = "unverified"
+performance = "unverified"
+source_gate = "verified"
+source_gate_note = "Apple documentation and installed macOS 27.0 SDK headers are recorded in docs/macos-support.md"

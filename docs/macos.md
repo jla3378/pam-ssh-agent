@@ -1,8 +1,13 @@
 # macOS installation
 
-This module supports Apple OpenPAM on arm64 macOS.
-Use the default Rust crypto implementation.
-The module reads the current `SSH_AUTH_SOCK`.
+The selected macOS production profile is defined in
+[macOS support contract](macos-support.md) and
+[support/macos/release-profile.toml](../support/macos/release-profile.toml).
+It targets Apple OpenPAM on arm64 macOS, uses the default Rust crypto implementation, and reads the current
+`SSH_AUTH_SOCK`.
+
+The broader build and runtime behavior described below is reference material until it has been qualified against that
+contract. A successful local build or direct PAM test does not qualify Apple's sudo integration.
 
 For a privileged sudo deployment, use the strict profile and an explicit per-user trust file. Replace the module path
 with the path supplied by the package or installation method:
