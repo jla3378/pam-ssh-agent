@@ -3,6 +3,8 @@
 The selected macOS production profile is defined in
 [macOS support contract](macos-support.md) and
 [support/macos/release-profile.toml](../support/macos/release-profile.toml).
+See the [PAM boundary audit](pam-boundary-audit.md) for the threat model and
+qualification record.
 It targets Apple OpenPAM on arm64 macOS, uses the default Rust crypto implementation, and reads the current
 `SSH_AUTH_SOCK`.
 
@@ -22,6 +24,19 @@ root-controlled. A helper executable must also be root-controlled. The helper en
 cleanup, and deadline are bounded as described in the main README. A strict helper must run as a non-root account and
 cannot create child processes.
 
+The strict trust file must use an absolute, byte-for-byte normalized path. The
+loader validates lexical parent authority, then permits safe root-owned
+intermediate aliases such as `/etc` while walking from `/` with descriptor-
+relative `openat`, `O_NOFOLLOW`, and `O_RESOLVE_BENEATH`. It rejects a final
+symlink. Every opened parent must be uid 0, a directory, free of group/world
+write permission, and free of an extended ACL. The final object must be uid 0,
+regular, mode `0600`, single-link, and free of an extended ACL. `O_UNIQUE`
+rejects hard links. The bounded read revalidates the file and all opened parent
+descriptors after the read; replacement, truncation, writes, ACL changes, and
+other mutations fail closed. The root OpenPAM loader boundary is verified for
+the recorded release artifact. Apple `/usr/bin/sudo` loading and the live sudo
+path remain unverified until their release gates pass.
+
 ## Build and inspect
 
 Run these commands from the source directory:
@@ -31,12 +46,21 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo build --locked --release
+PAM_LOADER_MODULE="$PWD/target/release/libpam_ssh_agent.dylib" \
+  cargo test --locked --test macos_dylib_load -- \
+    --ignored --exact release_dylib_is_accepted_by_dyld --nocapture
 cargo bench --bench per_request --locked
 xcrun nm -gU target/release/libpam_ssh_agent.dylib
 xcrun otool -L target/release/libpam_ssh_agent.dylib
 codesign --verify --strict target/release/libpam_ssh_agent.dylib
 codesign -dv --verbose=4 target/release/libpam_ssh_agent.dylib
 ```
+
+The release profile keeps Rust from stripping the linked Mach-O. Rust 1.96.1's
+debug-information stripping can produce a string-table offset that macOS 27
+rejects. Run the dyld preflight against the final bytes before any privileged
+loader test. If packaging strips the library, use Apple's `/usr/bin/strip -S`,
+then repeat the preflight and sign the resulting bytes.
 
 ### Optional Enhanced Security build
 
@@ -102,7 +126,39 @@ The tests compile SDK constants and use real PAM handles.
 The agent fixture uses a public test key and tests successful, untrusted, and denied signatures.
 It also tests unavailable sockets, missing items, invalid arguments, panic containment, and credential setup.
 Tests that create Unix sockets need permission to create local sockets.
-Two existing tests require root and remain ignored during normal test runs.
+Tests that require root remain ignored during normal test runs.
+
+## Qualification harnesses
+
+The adversarial agent suite exercises malformed, truncated, oversized, wrong-type, duplicate, trailing-data,
+disconnect, reset, fragmented, slow, replay, wrong-key, wrong-algorithm, invalid-signature, and impossible-count
+responses. It also checks bytewise short reads and writes and retry after one duplicate-identity failure:
+
+```sh
+cargo test --locked --test macos_agent_adversarial -- --nocapture
+```
+
+The OpenPAM loader suite stages a unique PAM service, loads the built module through `pam_start`, and checks
+success, untrusted and denied signatures, malformed and unknown options, absent sockets, repeated handles,
+credential flags, invalid flags, concurrent handles, resource counts, and cleanup. It requires root because it writes
+temporary entries below `/private/etc`; run the exact test binary from a user-created `agent-*` tmux session with the
+module path and local account supplied by the operator:
+
+```sh
+cargo test --locked --test macos_loader --no-run
+/usr/bin/sudo -k /usr/bin/env \
+PAM_LOADER_MODULE=/absolute/path/to/libpam_ssh_agent.dylib \
+PAM_LOADER_USER=local-account \
+/absolute/path/to/macos_loader-<hash> --ignored --exact openpam_dynamic_loader_qualification --nocapture
+```
+
+Run the unprivileged dyld preflight from the build section before this command. The loader command is a qualification
+step, not a normal unprivileged test. The recorded root run passed for the
+selected release artifact through real `pam_start`, `pam_authenticate`,
+`pam_setcred`, and `pam_end` handles. Apple sudo loading, fresh trusted-key
+authentication, live fallback, and rollback remain unverified. The public
+source tree does not include a machine-specific module path, trust file, key
+fingerprint, or package configuration.
 
 ## Install
 
@@ -130,7 +186,8 @@ Defaults env_keep += "SSH_AUTH_SOCK"
 
 Select each trusted public key by its SHA256 fingerprint.
 Store selected keys in `/etc/security/pam-ssh-agent/<username>`.
-Keep the file and its parent directories under root control.
+Keep the file root-owned with mode `0600`; keep each parent root-owned,
+non-writable by group or other, and free of extended ACLs.
 Never copy every agent identity into the trusted file.
 
 Build the package and host configuration before activation. Inspect PAM order, the key fingerprint, file ownership,
@@ -180,6 +237,13 @@ command and output before using it to guide changes.
 Xcode DocumentationSearch did not return the OpenPAM declarations.
 The installed headers supply the constants and signatures:
 `MacOSX27.0.sdk/usr/include/security/pam_constants.h`, `pam_modules.h`, and `pam_appl.h`.
+The installed `pam_authenticate(3)`, `pam_setcred(3)`, and `pam.conf(5)`
+manuals define dispatcher flag validation and policy lookup.
+The trust loader also uses `MacOSX27.0.sdk/usr/include/sys/fcntl.h` and
+`sys/acl.h`, with `man 2 open`, `man 3 acl_get_fd_np`, `man 3 acl_get_entry`,
+and `man 3 acl_get_perm_np`. Xcode DocumentationSearch was consulted for
+no-follow descriptor opening and ACL access. The selected toolchain is Xcode
+27.0 (27A266a), macOS SDK 27.0 (26A425), and Apple Clang 21.0.0.
 The developer directory and selected SDK are host-specific. Record their paths and versions with each build.
 [Apple XNU `kern_prot.c`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_prot.c)
 and [`kern_credential.c`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_credential.c)

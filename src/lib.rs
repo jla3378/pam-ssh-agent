@@ -12,6 +12,8 @@ mod nativecrypto;
 mod pamext;
 #[cfg(test)]
 mod test;
+#[cfg(target_os = "macos")]
+mod trust_path;
 mod verify;
 
 pub use crate::agent::SSHAgent;
@@ -30,6 +32,7 @@ use log::{debug, error, info};
 use ssh_key::PublicKey;
 use std::ffi::CStr;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use uzers::get_user_by_name;
 
 struct PamSshAgent;
@@ -50,16 +53,10 @@ impl PamHooks for PamSshAgent {
         args: Vec<&CStr>,
         _flags: PamFlag,
     ) -> PamResultCode {
-        match run(args, pam_handle) {
-            Ok(_) => {
-                debug!("Successful call to sm_authenticate(), returning PAM_SUCCESS");
-                PamResultCode::PAM_SUCCESS
-            }
-            Err(err) => {
-                error!("{err:?}");
-                debug!("Failed call to sm_authenticate(), returning PAM_AUTH_ERR");
-                PamResultCode::PAM_AUTH_ERR
-            }
+        if run(args, pam_handle, Instant::now()).is_ok() {
+            PamResultCode::PAM_SUCCESS
+        } else {
+            PamResultCode::PAM_AUTH_ERR
         }
     }
 
@@ -74,32 +71,68 @@ impl PamHooks for PamSshAgent {
     }
 }
 
-fn run(args: Vec<&CStr>, pam_handle: &PamHandle) -> Result<()> {
-    let context = PamContext::new(pam_handle)?;
-    init_logging(&context.service)?;
-    let args = Args::parse(args, &UnixEnvironment, &context)?;
-    if args.strict {
-        let calling_uid = validate_strict_user(&context.calling_user)?;
-        if args.authorized_keys_command.is_some() {
-            let helper_uid = if let Some(user) = &args.authorized_keys_command_user {
-                validate_strict_user(user)?
-            } else {
-                calling_uid
-            };
-            if helper_uid == 0 {
-                return Err(anyhow!("strict mode requires a non-root helper user"));
-            }
-        }
+#[derive(Clone, Copy)]
+struct AuthDeadline(Option<Instant>);
+
+impl AuthDeadline {
+    fn from_timeout(start: Instant, timeout: Option<Duration>) -> Self {
+        Self(timeout.map(|timeout| start + timeout))
     }
-    with_debug(args.debug, || do_authenticate(&args, &context))
+
+    fn check(self) -> Result<()> {
+        if self.0.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(anyhow!("authentication time budget exhausted"));
+        }
+        Ok(())
+    }
 }
 
-fn do_authenticate(args: &Args, context: &PamContext) -> Result<()> {
-    if let Some(ca_keys_file) = &args.ca_keys_file {
-        info!("ca_keys from '{ca_keys_file}'");
+fn run(args: Vec<&CStr>, pam_handle: &PamHandle, started: Instant) -> Result<()> {
+    let context = PamContext::new(pam_handle)?;
+    init_logging(&context.service);
+    let args = Args::parse(args, &UnixEnvironment, &context).inspect_err(|_| {
+        error!("Authentication failed");
+    })?;
+    let deadline = AuthDeadline::from_timeout(started, args.agent_timeout);
+    with_debug(args.debug, || {
+        let result = (|| {
+            if args.strict {
+                deadline.check()?;
+                let calling_uid = validate_strict_user(&context.calling_user)?;
+                if args.authorized_keys_command.is_some() {
+                    let helper_uid = if let Some(user) = &args.authorized_keys_command_user {
+                        validate_strict_user(user)?
+                    } else {
+                        calling_uid
+                    };
+                    if helper_uid == 0 {
+                        return Err(anyhow!("strict mode requires a non-root helper user"));
+                    }
+                }
+            }
+            do_authenticate(&args, &context, deadline)?;
+            deadline.check()
+        })();
+        match &result {
+            Ok(()) => debug!("Authentication checks succeeded"),
+            Err(_) if deadline.check().is_err() => {
+                error!("Authentication budget expired");
+            }
+            Err(_) => {
+                error!("Authentication failed");
+                debug!("Failed call to sm_authenticate(), returning PAM_AUTH_ERR");
+            }
+        }
+        result
+    })
+}
+
+fn do_authenticate(args: &Args, context: &PamContext, deadline: AuthDeadline) -> Result<()> {
+    if args.ca_keys_file.is_some() {
+        info!("Using configured certificate-authority keys");
     };
-    if let Some(authorized_keys_command) = &args.authorized_keys_command {
-        info!("Invoking command '{authorized_keys_command}' to obtain keys");
+    if args.authorized_keys_command.is_some() {
+        info!("Using configured key helper");
     }
 
     let filter = if args.strict {
@@ -109,30 +142,33 @@ fn do_authenticate(args: &Args, context: &PamContext) -> Result<()> {
             args.authorized_keys_command.as_deref(),
             args.authorized_keys_command_user.as_deref(),
             &context.calling_user,
+            deadline.0,
         )?
     } else {
-        IdentityFilter::new(
+        IdentityFilter::new_with_deadline(
             Path::new(args.file.as_str()),
             args.ca_keys_file.as_deref().map(Path::new),
             args.authorized_keys_command.as_deref(),
             args.authorized_keys_command_user.as_deref(),
             &context.calling_user,
+            deadline.0,
         )?
     };
+    deadline.check()?;
     if args.sshd_shortcut
         && check_sshd_special_case(Some(&context.service), &filter, UnixEnvironment)?
     {
+        deadline.check()?;
         return Ok(());
     }
     let path = get_path(args)?;
-    info!(
-        "Authenticating user '{}' using ssh-agent at '{path}'",
-        context.calling_user
-    );
-    info!("authorized keys from '{}'", args.file);
-    let ssh_agent_client = agent_connection::connect(Path::new(&path), args.agent_timeout)?;
+    info!("Authenticating with the configured ssh-agent");
+    let ssh_agent_client = agent_connection::connect_until(Path::new(&path), deadline.0)?;
     match authenticate(&filter, ssh_agent_client, &context.calling_user)? {
-        true => Ok(()),
+        true => {
+            deadline.check()?;
+            Ok(())
+        }
         false => Err(anyhow!("Agent did not know of any of the allowed keys")),
     }
 }
@@ -224,6 +260,7 @@ mod tests {
     use crate::{check_sshd_special_case, validate_strict_user};
     use anyhow::Result;
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_check_sshd_special_case() -> Result<()> {
@@ -271,5 +308,18 @@ mod tests {
         assert!(validate_strict_user("codex-account-that-does-not-exist").is_err());
         let current = uzers::get_current_username().expect("current user");
         assert!(validate_strict_user(&current.to_string_lossy()).is_ok());
+    }
+
+    #[test]
+    fn authentication_budget_is_single_absolute_deadline() {
+        let started = Instant::now();
+        let budget = super::AuthDeadline::from_timeout(started, Some(Duration::from_millis(1)));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(budget.check().is_err());
+        assert!(
+            super::AuthDeadline::from_timeout(started, None)
+                .check()
+                .is_ok()
+        );
     }
 }

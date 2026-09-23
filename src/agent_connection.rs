@@ -8,11 +8,17 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-pub fn connect(path: &Path, timeout: Option<Duration>) -> Result<Client> {
-    let Some(timeout) = timeout else {
+pub(crate) fn connect_until(path: &Path, deadline: Option<Instant>) -> Result<Client> {
+    let Some(deadline) = deadline else {
         return Ok(Client::connect(path)?);
     };
-    let deadline = Instant::now() + timeout;
+    if Instant::now() >= deadline {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "SSH-agent operation timed out",
+        )
+        .into());
+    }
     let stream = connect_unix(path, deadline)?;
     Ok(Client::with_read_write(Box::new(DeadlineStream {
         stream,
@@ -64,21 +70,35 @@ fn connect_unix(path: &Path, deadline: Instant) -> std::io::Result<UnixStream> {
         status_flags | libc::O_NONBLOCK,
     )?;
 
-    let connected = unsafe {
-        libc::connect(
-            fd.as_raw_fd(),
-            (&raw const address).cast::<libc::sockaddr>(),
-            address_len as libc::socklen_t,
-        )
-    } == 0;
-    if !connected {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::EINPROGRESS) {
-            return Err(error);
+    loop {
+        if unsafe {
+            libc::connect(
+                fd.as_raw_fd(),
+                (&raw const address).cast::<libc::sockaddr>(),
+                address_len as libc::socklen_t,
+            )
+        } == 0
+        {
+            break;
         }
-        wait_for_connect(fd.as_raw_fd(), deadline)?;
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "SSH-agent connection timed out",
+                    ));
+                }
+            }
+            Some(libc::EINPROGRESS) | Some(libc::EALREADY) => {
+                wait_for_connect(fd.as_raw_fd(), deadline)?;
+                break;
+            }
+            Some(libc::EISCONN) => break,
+            _ => return Err(error),
+        }
     }
-    set_fd_flags(fd.as_raw_fd(), libc::F_SETFL, status_flags)?;
     Ok(UnixStream::from(fd))
 }
 
@@ -156,43 +176,79 @@ impl DeadlineStream {
         Ok(remaining)
     }
 
-    fn map_timeout(error: std::io::Error) -> std::io::Error {
-        if matches!(
-            error.kind(),
-            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-        ) {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "SSH-agent operation timed out",
-            )
-        } else {
-            error
+    fn wait(&self, events: libc::c_short) -> std::io::Result<()> {
+        loop {
+            let remaining = self.remaining()?;
+            let mut poll_fd = libc::pollfd {
+                fd: self.stream.as_raw_fd(),
+                events,
+                revents: 0,
+            };
+            let milliseconds = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+            let result = unsafe { libc::poll(&mut poll_fd, 1, milliseconds) };
+            if result > 0 {
+                return Ok(());
+            }
+            if result == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "SSH-agent operation timed out",
+                ));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
         }
     }
 }
 
 impl Read for DeadlineStream {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        self.stream.set_read_timeout(Some(self.remaining()?))?;
-        self.stream.read(buffer).map_err(Self::map_timeout)
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            self.wait(libc::POLLIN)?;
+            match self.stream.read(buffer) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    ) => {}
+                result => return result,
+            }
+        }
     }
 }
 
 impl Write for DeadlineStream {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
-        self.stream.write(buffer).map_err(Self::map_timeout)
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            self.wait(libc::POLLOUT)?;
+            match self.stream.write(buffer) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    ) => {}
+                result => return result,
+            }
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
-        self.stream.flush().map_err(Self::map_timeout)
+        self.remaining()?;
+        self.stream.flush()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DeadlineStream, connect};
+    use super::{DeadlineStream, connect_until};
     use ssh_agent_client_rs::Client;
     use ssh_encoding::Encode;
     use ssh_key::PublicKey;
@@ -285,9 +341,20 @@ mod tests {
     #[test]
     fn rejects_invalid_socket_path() {
         let path = std::path::Path::new("");
-        let Err(error) = connect(path, Some(Duration::from_millis(10))) else {
+        let Err(error) = connect_until(path, Some(Instant::now() + Duration::from_millis(10)))
+        else {
             panic!("empty socket path unexpectedly connected");
         };
         assert!(error.to_string().contains("invalid Unix socket path"));
+    }
+
+    #[test]
+    fn expired_deadline_precedes_socket_connection() {
+        let path = std::path::Path::new("/does/not/exist");
+        let Err(error) = connect_until(path, Some(Instant::now() - Duration::from_millis(1)))
+        else {
+            panic!("expired deadline unexpectedly connected");
+        };
+        assert!(error.to_string().contains("timed out"));
     }
 }

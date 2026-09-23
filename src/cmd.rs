@@ -29,7 +29,14 @@ pub fn run(
     effective_uid: u32,
     effective_gid: Option<u32>,
 ) -> Result<String> {
-    run_inner(command, timeout, effective_uid, effective_gid, false)
+    run_inner(
+        command,
+        Instant::now() + timeout,
+        Some(timeout),
+        effective_uid,
+        effective_gid,
+        false,
+    )
 }
 
 pub(crate) fn run_without_descendants(
@@ -38,12 +45,38 @@ pub(crate) fn run_without_descendants(
     effective_uid: u32,
     effective_gid: Option<u32>,
 ) -> Result<String> {
-    run_inner(command, timeout, effective_uid, effective_gid, true)
+    run_inner(
+        command,
+        Instant::now() + timeout,
+        Some(timeout),
+        effective_uid,
+        effective_gid,
+        true,
+    )
+}
+
+pub(crate) fn run_without_descendants_until(
+    command: &[&str],
+    deadline: Instant,
+    effective_uid: u32,
+    effective_gid: Option<u32>,
+) -> Result<String> {
+    run_inner(command, deadline, None, effective_uid, effective_gid, true)
+}
+
+pub(crate) fn run_until(
+    command: &[&str],
+    deadline: Instant,
+    effective_uid: u32,
+    effective_gid: Option<u32>,
+) -> Result<String> {
+    run_inner(command, deadline, None, effective_uid, effective_gid, false)
 }
 
 fn run_inner(
     command: &[&str],
-    timeout: Duration,
+    deadline: Instant,
+    timeout: Option<Duration>,
     effective_uid: u32,
     effective_gid: Option<u32>,
     prevent_descendants: bool,
@@ -97,8 +130,14 @@ fn run_inner(
         });
     }
 
-    let deadline = Instant::now() + timeout;
+    if Instant::now() >= deadline {
+        return Err(timeout_error(command[0], timeout));
+    }
     let mut child = cmd.spawn()?;
+    if Instant::now() >= deadline {
+        terminate_and_reap(&mut child);
+        return Err(timeout_error(command[0], timeout));
+    }
     let streams = (|| -> Result<_> {
         let stdout = child
             .stdout
@@ -149,11 +188,7 @@ fn run_inner(
         let now = Instant::now();
         if now >= deadline {
             terminate_and_reap(&mut child);
-            return Err(anyhow!(
-                "Timed out waiting for command '{}' after {:?}",
-                command[0],
-                timeout
-            ));
+            return Err(timeout_error(command[0], timeout));
         }
         if let Err(error) = wait_for_output(&stdout, stdout_eof, &stderr, stderr_eof, deadline) {
             terminate_and_reap(&mut child);
@@ -174,11 +209,20 @@ fn run_inner(
     }
 
     if !stderr_bytes.is_empty() {
-        for line in String::from_utf8(stderr_bytes)?.lines() {
-            warn!("stderr from {}: {}", command[0], line);
-        }
+        warn!("Configured key helper wrote diagnostic output");
     }
     Ok(String::from_utf8(stdout_bytes)?.trim_end().to_owned())
+}
+
+fn timeout_error(command: &str, timeout: Option<Duration>) -> anyhow::Error {
+    match timeout {
+        Some(timeout) => anyhow!(
+            "Timed out waiting for command '{}' after {:?}",
+            command,
+            timeout
+        ),
+        None => anyhow!("Timed out waiting for command '{}'", command),
+    }
 }
 
 fn set_nonblocking(stream: &impl AsRawFd) -> std::io::Result<()> {
@@ -275,10 +319,10 @@ fn terminate_and_reap(child: &mut Child) {
 
 #[cfg(test)]
 mod tests {
-    use crate::cmd::{run, run_without_descendants};
+    use crate::cmd::{run, run_until, run_without_descendants};
     use crate::environment::get_uid;
     use anyhow::Result;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use uzers::{get_current_gid, get_current_uid};
 
     static TIMEOUT: Duration = Duration::from_secs(2);
@@ -372,6 +416,25 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("Timed out"));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn expired_deadline_does_not_spawn_helper() {
+        let marker = std::env::temp_dir().join(format!(
+            "pam-ssh-agent-expired-helper-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let marker = marker.to_string_lossy().into_owned();
+        let error = run_until(
+            &["/usr/bin/touch", &marker],
+            Instant::now() - Duration::from_millis(1),
+            get_current_uid(),
+            Some(get_current_gid()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Timed out"));
+        assert!(!std::path::Path::new(&marker).exists());
     }
 
     #[test]

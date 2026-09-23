@@ -150,7 +150,17 @@ macro_rules! pam_try {
 }
 
 fn panic_guard<F: FnOnce() -> PamResultCode>(f: F) -> PamResultCode {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(PamResultCode::PAM_ABORT)
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(code) => code,
+        Err(payload) => {
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(payload)))
+            {
+                std::mem::forget(payload);
+            }
+            PamResultCode::PAM_ABORT
+        }
+    }
 }
 
 /// Materializes the PAM module argv into a `Vec<&CStr>`.
@@ -229,14 +239,38 @@ pub mod test {
     use std::os::raw::{c_char, c_int};
     use std::ptr;
 
+    struct PanicOnDrop;
+
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("panic payload drop");
+        }
+    }
+
     struct Foo;
-    impl PamHooks for Foo {}
+
+    impl PamHooks for Foo {
+        fn sm_authenticate(
+            _pamh: &mut PamHandle,
+            _args: Vec<&CStr>,
+            _flags: crate::constants::PamFlag,
+        ) -> PamResultCode {
+            std::panic::panic_any(PanicOnDrop);
+        }
+    }
 
     pam_hooks!(Foo);
 
     #[test]
     fn panic_returns_error_code() {
         let code = super::panic_guard(|| panic!("intentional"));
+        assert_eq!(code, PamResultCode::PAM_ABORT);
+    }
+
+    #[test]
+    fn panic_payload_drop_cannot_escape_exported_ffi() {
+        let pamh = ptr::NonNull::<PamHandle>::dangling().as_ptr();
+        let code = unsafe { pam_sm_authenticate(pamh, 0, 0, ptr::null()) };
         assert_eq!(code, PamResultCode::PAM_ABORT);
     }
 

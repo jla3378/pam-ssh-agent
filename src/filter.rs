@@ -8,11 +8,12 @@ use ssh_agent_client_rs::Identity::{Certificate, PublicKey};
 use ssh_key::AuthorizedKeys;
 use ssh_key::public::KeyData;
 use std::collections::HashSet;
-use std::fs::{self, File, Metadata};
+use std::fs::{self, Metadata};
+#[cfg(any(test, not(target_os = "macos")))]
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uzers::uid_t;
 
 /// An IdentityFilter can determine if an Identity provided by the ssh-agent is trusted or not
@@ -54,6 +55,26 @@ impl IdentityFilter {
             authorized_keys_command_user,
             calling_user,
             PolicyMode::Legacy,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_deadline(
+        authorized_keys_file: &Path,
+        ca_keys_file: Option<&Path>,
+        authorized_keys_command: Option<&str>,
+        authorized_keys_command_user: Option<&str>,
+        calling_user: &str,
+        deadline: Option<Instant>,
+    ) -> Result<Self> {
+        Self::new_with_mode(
+            authorized_keys_file,
+            ca_keys_file,
+            authorized_keys_command,
+            authorized_keys_command_user,
+            calling_user,
+            PolicyMode::Legacy,
+            deadline,
         )
     }
 
@@ -63,6 +84,7 @@ impl IdentityFilter {
         authorized_keys_command: Option<&str>,
         authorized_keys_command_user: Option<&str>,
         calling_user: &str,
+        deadline: Option<Instant>,
     ) -> Result<Self> {
         Self::new_with_mode(
             authorized_keys_file,
@@ -71,6 +93,7 @@ impl IdentityFilter {
             authorized_keys_command_user,
             calling_user,
             PolicyMode::Strict,
+            deadline,
         )
     }
 
@@ -81,7 +104,9 @@ impl IdentityFilter {
         authorized_keys_command_user: Option<&str>,
         calling_user: &str,
         mode: PolicyMode,
+        deadline: Option<Instant>,
     ) -> Result<Self> {
+        check_deadline(deadline)?;
         let mut identities = match from_file(authorized_keys_file, false, mode) {
             Ok(keys) => keys,
             Err(error)
@@ -91,9 +116,7 @@ impl IdentityFilter {
                         .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
             {
                 if ca_keys_file.is_none() && authorized_keys_command.is_none() {
-                    info!(
-                        "No valid keys for authentication, {authorized_keys_file:?} does not exist"
-                    );
+                    info!("No configured authentication keys were found");
                 }
                 Vec::new()
             }
@@ -101,12 +124,20 @@ impl IdentityFilter {
         };
 
         if let Some(ca_keys_file) = ca_keys_file {
+            check_deadline(deadline)?;
             identities.extend(from_file(ca_keys_file, true, mode)?);
         }
 
         if let Some(cmd) = authorized_keys_command {
+            check_deadline(deadline)?;
             let user = authorized_keys_command_user.unwrap_or(calling_user);
-            identities.extend(from_command(cmd, get_uid(user)?, calling_user, mode)?);
+            identities.extend(from_command(
+                cmd,
+                get_uid(user)?,
+                calling_user,
+                mode,
+                deadline,
+            )?);
         }
         Ok(Self::from(identities, mode == PolicyMode::Strict))
     }
@@ -148,20 +179,14 @@ impl IdentityFilter {
         match identity {
             PublicKey(key) => {
                 if self.keys.contains(key.key_data()) {
-                    debug!(
-                        "found a matching key: {}",
-                        key.fingerprint(Default::default())
-                    );
+                    debug!("Found a matching public key");
                     return true;
                 }
             }
             Certificate(cert) => {
                 let ca_key = cert.signature_key();
                 if self.ca_keys.contains(ca_key) {
-                    debug!(
-                        "found a matching cert-authority key: {}",
-                        ca_key.fingerprint(Default::default())
-                    );
+                    debug!("Found a matching certificate-authority key");
                     return true;
                 }
             }
@@ -185,6 +210,7 @@ fn from_command(
     uid: uid_t,
     calling_user: &str,
     mode: PolicyMode,
+    deadline: Option<Instant>,
 ) -> Result<Vec<Authorized>> {
     let canonical;
     let command = if mode == PolicyMode::Strict {
@@ -195,15 +221,29 @@ fn from_command(
     } else {
         command
     };
-    debug!(
-        "Invoking command '{command} {calling_user}' to obtain public keys for user {calling_user}"
-    );
+    debug!("Invoking the configured key helper");
+    let command_deadline = deadline.map(|deadline| deadline.min(Instant::now() + MAX_DURATION));
     let buf = if mode == PolicyMode::Strict {
-        cmd::run_without_descendants(&[command, calling_user], MAX_DURATION, uid, None)?
+        if let Some(deadline) = command_deadline {
+            check_deadline(Some(deadline))?;
+            cmd::run_without_descendants_until(&[command, calling_user], deadline, uid, None)?
+        } else {
+            cmd::run_without_descendants(&[command, calling_user], MAX_DURATION, uid, None)?
+        }
+    } else if let Some(deadline) = command_deadline {
+        check_deadline(Some(deadline))?;
+        cmd::run_until(&[command, calling_user], deadline, uid, None)?
     } else {
         cmd::run(&[command, calling_user], MAX_DURATION, uid, None)?
     };
     parse_policy(&buf, &format!("{command}:(output):"), false, mode)
+}
+
+fn check_deadline(deadline: Option<Instant>) -> Result<()> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(anyhow!("authentication time budget exhausted"));
+    }
+    Ok(())
 }
 
 fn from_file(filename: &Path, ca_keys: bool, mode: PolicyMode) -> Result<Vec<Authorized>> {
@@ -232,8 +272,8 @@ fn parse_policy(buf: &str, what: &str, ca_keys: bool, mode: PolicyMode) -> Resul
             }
             Some(Authorized::CAKey(key_data))
         }
-        Err(e) => {
-            info!("Failed to parse line {what}:{i}': {e}");
+        Err(_e) => {
+            info!("Failed to parse configured key line {i}");
             None
         }
     });
@@ -269,10 +309,16 @@ fn from_str_strict(buf: &str, what: &str, ca_keys: bool) -> Result<Vec<Authorize
     Ok(authorized)
 }
 
+#[cfg(target_os = "macos")]
+fn read_strict_file(path: &Path, required_uid: u32) -> Result<String> {
+    crate::trust_path::read_policy(path, required_uid, MAX_POLICY_BYTES)
+}
+
+#[cfg(not(target_os = "macos"))]
 fn read_strict_file(path: &Path, required_uid: u32) -> Result<String> {
     let canonical = validate_trust_path(path, required_uid)?;
     let expected = fs::metadata(&canonical)?;
-    let file = File::open(&canonical)?;
+    let file = fs::File::open(&canonical)?;
     let actual = file.metadata()?;
     if expected.dev() != actual.dev() || expected.ino() != actual.ino() {
         return Err(anyhow!("Trusted-key file changed while opening"));
@@ -280,6 +326,7 @@ fn read_strict_file(path: &Path, required_uid: u32) -> Result<String> {
     read_bounded(file)
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn read_bounded(reader: impl Read) -> Result<String> {
     let mut bytes = Vec::new();
     reader.take(MAX_POLICY_BYTES + 1).read_to_end(&mut bytes)?;
@@ -357,6 +404,7 @@ mod tests {
     use ssh_key::{Certificate, PublicKey};
     use std::env;
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_read_public_keys() -> anyhow::Result<()> {
@@ -398,7 +446,11 @@ mod tests {
     #[test]
     fn strict_policy_rejects_options_and_malformed_lines() -> anyhow::Result<()> {
         let key = include_str!(data!("id_ed25519.pub")).trim();
-        assert_eq!(from_str_strict(key, "test", false)?.len(), 1);
+        let parsed = from_str_strict(key, "test", false)?;
+        assert_eq!(parsed.len(), 1);
+        let filter = IdentityFilter::from(parsed, true);
+        let identity: Identity = PublicKey::from_openssh(key)?.into();
+        assert!(filter.filter(&identity));
         assert_eq!(
             from_str_strict(&format!("cert-authority {key}"), "test", false)?.len(),
             1
@@ -433,6 +485,22 @@ mod tests {
     fn strict_policy_requires_normalized_absolute_paths() {
         assert!(validate_trust_path(Path::new("relative"), 0).is_err());
         assert!(validate_trust_path(Path::new("/usr/bin/../bin/true"), 0).is_err());
+    }
+
+    #[test]
+    fn expired_authentication_budget_precedes_policy_io() {
+        let result = IdentityFilter::new_strict(
+            Path::new("/does/not/exist"),
+            None,
+            None,
+            None,
+            "fixture-user",
+            Some(Instant::now() - Duration::from_millis(1)),
+        );
+        let Err(error) = result else {
+            panic!("expired budget unexpectedly loaded a policy");
+        };
+        assert!(error.to_string().contains("time budget exhausted"));
     }
 
     #[test]

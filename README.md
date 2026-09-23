@@ -93,8 +93,11 @@ configuration file in `/etc/pam.d`. pam_ssh_agent currently understands the foll
   and execution time.
 * `sshd_shortcut` explicitly enable the `SSH_AUTH_INFO_0` shortcut. It is disabled by `strict` unless this option is
   present.
-* `agent_timeout=SECONDS` bound the complete SSH-agent connection and request. Values range from 1 to 300 seconds.
-  `strict` uses 30 seconds by default. The timeout includes connection, identity listing, signing, and response reads.
+* `agent_timeout=SECONDS` sets one absolute budget for the complete authentication attempt. Values range from 1 to
+  300 seconds. `strict` uses 30 seconds by default. The budget starts at PAM authentication entry and includes
+  context and argument handling, policy loading, helper execution, agent connection and requests, signature
+  verification, and diagnostic logging before success. A request that reaches the deadline fails closed. Failure
+  reporting happens after the authentication decision and cannot change a failure into success.
 
 The strict profile is intended for a root-controlled sudo or equivalent PAM configuration. Its trusted file must be a
 regular root-owned file with root-owned path components and no group or world write permission. The active macOS configuration uses

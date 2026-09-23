@@ -12,7 +12,13 @@ The manifest omits upstream example and integration targets that are not include
 The patch selects macOS result codes, flags, message styles, and item identifiers.
 Linux definitions remain unchanged.
 Exported hooks accept signed C flags. Rust hook methods retain PamFlag.
-Argument checks and panic containment remain in place.
+Argument checks reject null or inconsistent PAM inputs. The panic guard disposes
+ordinary payloads inside a second unwind boundary. If a payload destructor also
+panics, the guard forgets the secondary payload so no unwind crosses the C ABI.
+
+The macOS `pam_conv(3)` contract leaves failure-path allocations with the
+conversation callback. The binding frees and zeroizes successful responses and
+does not take ownership after a callback error.
 
 Source gate: Xcode DocumentationSearch did not return OpenPAM declarations.
 The installed SDK headers supply the ABI definitions:

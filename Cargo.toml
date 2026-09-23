@@ -50,3 +50,7 @@ native-crypto = ["dep:openssl", "dep:p256", "dep:p384", "dep:p521"]
 
 [patch.crates-io]
 pam-bindings = { path = "vendor/pam-bindings" }
+ssh-agent-client-rs = { path = "vendor/ssh-agent-client-rs" }
+
+[profile.release]
+strip = "none"

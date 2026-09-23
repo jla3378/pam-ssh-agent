@@ -105,8 +105,11 @@ fn validate_cert(cert: &ssh_key::Certificate, when: SystemTime, principal: &str)
     };
 
     let ca_fingerprint = ca_key.fingerprint(HashAlg::Sha256);
-    if let Err(e) = cert.validate_at(seconds_since_epoch.as_secs(), [&ca_fingerprint]) {
-        info!("Certificate validation failed: {e:?}");
+    if cert
+        .validate_at(seconds_since_epoch.as_secs(), [&ca_fingerprint])
+        .is_err()
+    {
+        info!("Certificate validation failed");
         return false;
     }
 
@@ -116,7 +119,7 @@ fn validate_cert(cert: &ssh_key::Certificate, when: SystemTime, principal: &str)
     }
 
     if !cert.valid_principals().iter().any(|p| p == principal) {
-        info!("Cert matches but '{principal}' is not in the list of valid principals.");
+        info!("Certificate principal validation failed");
         return false;
     }
 
