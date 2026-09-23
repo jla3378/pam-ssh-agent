@@ -1,32 +1,34 @@
-# Documenting the process of making a new release
+# Release process
 
-1. When there is time to cut a new release, create a commit with version updates in Cargo.toml, create-deb-dsc.sh, 
-   and debian/changelog. Commit this to a new branch and push it. Anything that needs fixing in the steps below, please 
-   create new commits via pull requests on main and then rebase the vesrion update branch on top of it and try again. 
-2. Log onto a Fedora box (nypon.noa.re)
-   1. Check out the version update branch
-   2. Build a .crate with `cargo package`
-   3. Copy the .crate to rpm-packaging/pam-ssh-agent
-   4. Run `rust2rpm --path _new_crate_` to generate the new spec
-   5. Build the .src.rpm with `rpmbuild -bs rust-pam-ssh-agent.spec --define "_sourcedir ." --define "_srcrpmdir ."`
-   6. Verify that the .src.rpm can be built with `mock --addrepo=https://download.copr.fedorainfracloud.org/results/noa/rust/fedora-44-aarch64 ./rust-pam-ssh-agent-0.9.7-1.fc44.src.rpm`
-3. Log onto an Ubuntu box (hjortron.noa.re)
-   1. Check out the version update branch
-   2. Generate source packages with ./create-deb-dsc.sh
-   3. Verify that the debian/control vendor line is correct by running `CARGO_VENDOR_DIR=vendor /usr/share/cargo/bin/dh-cargo-vendored-sources`
-   4. Update debian/control if needed and re-run
-   3. Test building the output with `sbuild -d noble ../*.dsc`
-4. Merge the version update branch to main
-5. Tag the version
-6. `cargo publish`
-7. In the rpm-pacakging repo
-   1. Update release version in Makefile
-   2. Update he shasum in crates.sha256
-   3. Verify that `make srpm outdir=/tmp/out` works
-   4. navigate to the previous build in the [COPR ui](https://copr.fedorainfracloud.org/coprs/noa/rust/builds/)
-   7. Click the "Resubmit" button on the previous build
-8. On the ubuntu box
-   1. Verify that the tagged commit is checked out 
-   2. Regeneate signed sources
-   3. Upload with `dput ppa:nresare/ppa .dsc`
+Use this checklist for a source release. Distribution packages can add platform-specific steps without making
+private builders, accounts, or host paths part of the source tree.
 
+1. Create a release issue and a release branch from the remote default branch.
+2. Update the version in `Cargo.toml` and any maintained package metadata. Update the changelog and compatibility
+   documentation in the same branch.
+3. Confirm that `Cargo.lock` is current. Record the exact Rust compiler, platform toolchain, SDK, target, and feature
+   set used for each release artifact.
+4. Run the local checks:
+
+   ```sh
+   cargo fmt --all -- --check
+   cargo clippy --locked --all-targets -- -D warnings
+   cargo test --locked --all-targets
+   cargo build --locked --release
+   cargo package --locked
+   ```
+
+5. Review locked dependencies, licenses, vendored-source provenance, exported PAM symbols, linked libraries, and the
+   final artifact signature. Record any skipped privileged test as an unverified release claim.
+6. Build each artifact from a clean checkout of the reviewed commit. Keep unsigned payload hashes separate from
+   signed package hashes.
+7. Review the complete source archive and documentation for private hostnames, user paths, credentials, deployment
+   configuration, and account-specific release infrastructure.
+8. Merge the reviewed branch, create an annotated version tag, and verify that the tag resolves to the reviewed
+   commit. Publish only the artifacts that passed the recorded checks.
+9. Publish checksums, dependency and license records, supported-platform limits, known limitations, installation
+   instructions, diagnostics, and rollback instructions with the release.
+
+For macOS, also follow `docs/macos.md`. Qualify the installed module through the intended PAM host with SIP enabled.
+Treat optional Enhanced Security slices as separate release variants until each slice has runtime evidence on
+compatible hardware.

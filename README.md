@@ -8,7 +8,6 @@ with agent forwarding enabled and the `sudo` command. The user proves their iden
 private key, and the signature is verified using a public key made available to the `pam-ssh-agent` module on the
 server. Combined with a setup where the private part of an authentication keypair is stored in custom hardware such as
 a YubiKey, a TPM chip, or the macOS secure enclave, this can provide a high level of security as well as convenience.
-I use the [Secretive](https://github.com/maxgoedjen/secretive) app on macOS for this purpose.
 
 This project is a re-implementation of the [pam_ssh_agent_auth](https://github.com/jbeverly/pam_ssh_agent_auth) module but does not share any code with that project.
 We are pretty close to covering all the features of the original implementation, along with some additional features
@@ -37,15 +36,9 @@ the ability to contribute feel free to have a look at the following issues:
 * Ubuntu packaging: https://github.com/nresare/pam-ssh-agent/issues/54
 * Arch linux packaging: https://github.com/nresare/pam-ssh-agent/issues/50
 
-While this work is completing, feel free to use https://copr.fedorainfracloud.org/coprs/noa/rust/ that has binary 
-packages for Fedora and Enterprise Linux derived distributions. The configuration that is invoked by the copr
-infrastructure to build those packages is available from https://github.com/nresare/rpm-packaging The latest version is
-also packaged for Ubuntu 24.04 available at https://launchpad.net/~nresare/+archive/ubuntu/ppa where the
-`*_sources.changes` and related tarfiles are constructed using the `create-deb-dsc.sh` script.
-
-For other users, it is entirely possible to simply invoke `cargo build --release` and copy the resulting
-`target/release/libpam_ssh_agent.so` to the directory that holds your pam modules. Mine is in 
-`/lib/x86_64-linux-gnu/security`.
+Until distribution packages are available, build with `cargo build --release` and install
+`target/release/libpam_ssh_agent.so` in the platform PAM module directory. Confirm the correct directory, ownership,
+mode, and PAM configuration format in the operating system documentation before activation.
 
 ## Example Usage
 
@@ -157,9 +150,8 @@ upgrade path from `pam_ssh_agent_auth` smoother as the previous functionality is
 * `%h` same as `~`, the home directory of the user referred to by the PAM item `PAM_USER`.
 * `%H` the value returned by `gethostname(3)`, truncated after the first period such that if `gethostname(3)` returns
   `host.example.com` this `%H` will turn into `host`.
-* `%f` the value returned by `gethostname(3)`. For the systems I have looked at, this value is not a fully qualified
-  domain name but if it was it would be returned. This behaviour, although a bit surprising is consistent with how
-  `pam_ssh_agent_auth` works.
+* `%f` the value returned by `gethostname(3)` without modification. The result can be a short name or a fully
+  qualified domain name. This behavior is consistent with `pam_ssh_agent_auth`.
 * `%u` the username of the user attempting to authenticate.
 * `%U` numeric uid of the user attempting to authenticate.
 
@@ -181,8 +173,8 @@ However, if the key is not in the list a secondary authentication method can be 
 In a [discussion](https://github.com/nresare/pam-ssh-agent/issues/24) about the possibility of having this piece of
 software be integrated into commercial upstream distributions, it was mentioned that such distributions might have
 a requirement that all crypto operations happens with FIPS validated software. Since the native rust crypto
-implementation that this software was using is not yet FIPS validated, but OpenSSL can be made to be, I decided
-to implement the option to use OpenSSL instead of the ssh-key crypto implementation using the `native-crypto` feature.
+implementation that this software was using is not yet FIPS validated, but OpenSSL can be made to be, the
+`native-crypto` feature provides the option to use OpenSSL instead of the ssh-key crypto implementation.
 
 Unless you are someone that has a mandate to only run FIPS validated crypto implementations, you probably don't want
 this feature enabled.
@@ -207,9 +199,7 @@ Licensed under either of the [Apache License, Version 2.0](http://www.apache.org
 
 ## How to contribute
 
-Just open a pull request against https://github.com/nresare/pam-ssh-agent. I have a github action
-that runs the test, `cargo fmt` and `cargo clippy` against diffs (as soon as I get around to trigger them)
-so it would be nice if you ran `make check` first locally to save a round-trip or two.
+Open a pull request against https://github.com/nresare/pam-ssh-agent. Run `make check` locally before submission.
 
 ### Contribution licensing
 
