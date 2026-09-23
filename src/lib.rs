@@ -76,7 +76,7 @@ impl PamHooks for PamSshAgent {
 
 fn run(args: Vec<&CStr>, pam_handle: &PamHandle) -> Result<()> {
     let context = PamContext::new(pam_handle)?;
-    init_logging(context.service.clone())?;
+    init_logging(&context.service)?;
     let args = Args::parse(args, &UnixEnvironment, &context)?;
     if args.strict {
         let calling_uid = validate_strict_user(&context.calling_user)?;
@@ -120,7 +120,7 @@ fn do_authenticate(args: &Args, context: &PamContext) -> Result<()> {
         )?
     };
     if args.sshd_shortcut
-        && check_sshd_special_case(Some(context.service.clone()), &filter, UnixEnvironment)?
+        && check_sshd_special_case(Some(&context.service), &filter, UnixEnvironment)?
     {
         return Ok(());
     }
@@ -182,17 +182,12 @@ fn validate_strict_user(name: &str) -> Result<u32> {
 /// Returns true if SSH_SERVICE is sshd, and the environment variable SSH_AUTH_INFO_0 is set
 /// to a public key that filter is configured with.
 fn check_sshd_special_case(
-    service: Option<String>,
+    service: Option<&str>,
     filter: &IdentityFilter,
     env: impl Environment,
 ) -> Result<bool> {
-    match service {
-        Some(service) => {
-            if service != "sshd" {
-                return Ok(false);
-            }
-        }
-        None => return Ok(false),
+    if service != Some("sshd") {
+        return Ok(false);
     }
     let Some(key) = env.get_env("SSH_AUTH_INFO_0") else {
         debug!("calling service is sshd but SSH_AUTH_INFO_0 is not set");
@@ -237,14 +232,14 @@ mod tests {
 
         // happy path, keys match
         assert!(check_sshd_special_case(
-            Some("sshd".to_string()),
+            Some("sshd"),
             &filter,
             CannedEnv::new(vec![include_str!(data!("id_ed25519.pub"))])
         )?);
 
         // different key
         assert!(!check_sshd_special_case(
-            Some("sshd".to_string()),
+            Some("sshd"),
             &filter,
             CannedEnv::new(vec![include_str!(data!("ca_key.pub"))])
         )?);
@@ -254,19 +249,15 @@ mod tests {
 
         // if service is not set to something other than sshd, return false
         assert!(!check_sshd_special_case(
-            Some("something".to_string()),
+            Some("something"),
             &filter,
             DummyEnv
         )?);
 
         // not a key
         assert!(
-            check_sshd_special_case(
-                Some("sshd".to_string()),
-                &filter,
-                CannedEnv::new(vec!["invalid"])
-            )
-            .is_err()
+            check_sshd_special_case(Some("sshd"), &filter, CannedEnv::new(vec!["invalid"]))
+                .is_err()
         );
 
         Ok(())

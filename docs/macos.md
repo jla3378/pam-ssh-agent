@@ -4,10 +4,11 @@ This module supports Apple OpenPAM on arm64 macOS.
 Use the default Rust crypto implementation.
 The module reads the current `SSH_AUTH_SOCK`.
 
-For a privileged sudo deployment, use the strict profile and an explicit per-user trust file:
+For a privileged sudo deployment, use the strict profile and an explicit per-user trust file. Replace the module path
+with the path supplied by the package or installation method:
 
 ```text
-auth sufficient /nix/store/…-pam-ssh-agent-…/lib/security/pam_ssh_agent.so strict agent_timeout=30 file=/etc/security/pam-ssh-agent/%u
+auth sufficient /usr/local/lib/security/pam_ssh_agent.so strict agent_timeout=30 file=/etc/security/pam-ssh-agent/%u
 ```
 
 Strict mode disables the legacy `sshd` environment shortcut unless `sshd_shortcut` is explicitly added. It rejects
@@ -32,6 +33,61 @@ codesign --verify --strict target/release/libpam_ssh_agent.dylib
 codesign -dv --verbose=4 target/release/libpam_ssh_agent.dylib
 ```
 
+### Optional Enhanced Security build
+
+The standard build remains the default. The opt-in build helper is
+`./scripts/build-macos-enhanced.sh`.
+
+Set these switches only when the matching slice or security mode is required:
+
+```sh
+ENABLE_ENHANCED_SECURITY=YES \
+ENABLE_POINTER_AUTHENTICATION=YES \
+ENABLE_HARDWARE_CHECKED_POINTER_ARITHMETIC_SLICE=YES \
+./scripts/build-macos-enhanced.sh
+```
+
+`ENABLE_ENHANCED_SECURITY` enables strong stack protection and release-mode overflow checks. Pointer authentication
+defaults to the enhanced security setting. `ENABLE_POINTER_AUTHENTICATION=YES` adds an `arm64e` slice.
+`ENABLE_HARDWARE_CHECKED_POINTER_ARITHMETIC_SLICE=YES` adds an `arm64e.x1` slice. `arm64` is always included. Each
+setting accepts `YES` or `NO` and defaults to `NO` unless stated above. The helper rejects unsupported values.
+
+The supported output matrix is:
+
+| Settings | Slices |
+| --- | --- |
+| default | `arm64` |
+| pointer authentication | `arm64`, `arm64e` |
+| checked pointer arithmetic | `arm64`, `arm64e.x1` |
+| both options | `arm64`, `arm64e`, `arm64e.x1` |
+
+The `arm64e` and `arm64e.x1` builds use nightly Rust and `build-std` because Rust support for
+`arm64e-apple-darwin` is Tier 3. The toolchain must include `rust-src`. Set `MACOS_ENHANCED_RUST_TOOLCHAIN` to a pinned
+Rust toolchain for reproducible packaging. The x1 code-generation features are unstable Rust interfaces. The helper
+therefore verifies the Mach-O subtype and checks the generated code for CPA2 and PAC instructions. It also reports the
+selected Rust, Xcode, and SDK versions. An x1 build can be inspected on older Apple silicon, but it needs CPA2-capable
+hardware for a run-time test.
+
+The reference settings are in [support/macos/EnhancedSecurity.xcconfig](../support/macos/EnhancedSecurity.xcconfig).
+The reference entitlements are in [support/macos/enhanced-security.entitlements](../support/macos/enhanced-security.entitlements).
+They are examples only and are unused by default.
+
+The entitlement dependency set is:
+
+```text
+com.apple.security.hardened-process = true
+com.apple.security.hardened-process.enhanced-security-version-string = 2
+com.apple.security.hardened-process.checked-allocations = true
+com.apple.security.hardened-process.checked-allocations.enforce-checked-pointer-arithmetic-overflow = true
+```
+
+The Enhanced Security capability requires the hardened-process entitlement and version string. Checked pointer
+arithmetic also requires the checked-allocations entitlement. These entitlements belong on a compatible host
+executable. Code signing does not preserve them on this dynamic library, and dylib entitlements cannot change the
+entitlements of Apple `/usr/bin/sudo`. The sample therefore documents host integration; it does not claim that the
+SIP-protected sudo process enables these run-time checks. The helper accepts a code-signing identity for the library,
+but it intentionally does not pass host entitlements to the library signature.
+
 The benchmark reports p50, p95, and p99 for policy loading and in-process authentication with one or four identities.
 The authentication cases include selection, challenge generation, fixture-backed signing, and verification. They exclude
 Unix-socket IPC, a real or hardware-backed agent, allocations, and resident memory. The harness does not cache filters
@@ -43,23 +99,23 @@ It also tests unavailable sockets, missing items, invalid arguments, panic conta
 Tests that create Unix sockets need permission to create local sockets.
 Two existing tests require root and remain ignored during normal test runs.
 
-## Install through nix-atlas
+## Install
 
-Pin an immutable source commit and use Cargo.lock.
-Install `libpam_ssh_agent.dylib` as `lib/security/pam_ssh_agent.so` in the package.
-Use the absolute package path in `security.pam.services.sudo_local.text`.
+Build the release artifact, then install it using the package or configuration system used by the host. Place the
+library in that system's PAM module directory and use its absolute path in the local sudo PAM configuration. Keep the
+source revision and `Cargo.lock` with the build record so the artifact can be reproduced.
 
 Keep this order:
 
 ```text
-auth optional /nix/store/…-pam_reattach-…/lib/pam/pam_reattach.so
-auth sufficient /nix/store/…-pam-ssh-agent-…/lib/security/pam_ssh_agent.so strict agent_timeout=30 file=/etc/security/pam-ssh-agent/%u
+auth optional /path/to/pam_reattach.so
+auth sufficient /path/to/pam_ssh_agent.so strict agent_timeout=30 file=/etc/security/pam-ssh-agent/%u
 auth sufficient pam_tid.so
 ```
 
-Keep Apple's `/etc/pam.d/sudo` unchanged.
-Its `sudo_local` include precedes the password fallback.
-Do not replace the Nix-managed `sudo_local` symlink manually.
+Keep Apple's `/etc/pam.d/sudo` unchanged when using its local include mechanism. Keep the existing reattach module
+before this module and the Touch ID module after it, so Apple's password fallback remains available. Apply changes
+through the host's configuration mechanism instead of replacing managed files by hand.
 
 Keep one sudoers declaration:
 
@@ -70,26 +126,22 @@ Defaults env_keep += "SSH_AUTH_SOCK"
 Select each trusted public key by its SHA256 fingerprint.
 Store selected keys in `/etc/security/pam-ssh-agent/<username>`.
 Keep the file and its parent directories under root control.
-A root-owned Nix store file through `/etc/static` meets this requirement.
 Never copy every agent identity into the trusted file.
 
-Build the package and system before activation.
-Inspect PAM order, the key fingerprint, file ownership, and sudoers syntax.
-Record the current generation before activation.
-Run privileged commands in a user-created `agent-*` tmux session with approval for each command.
-Keep a separate administrative session available during validation.
+Build the package and host configuration before activation. Inspect PAM order, the key fingerprint, file ownership,
+and sudoers syntax. Keep a recovery shell available during validation.
 
 ## Diagnose
 
 ```sh
 ssh-add -l
-ssh-keygen -lf ~/.ssh/id_ed25519.pub
+ssh-keygen -lf <public-key-file>
 csrutil status
 log show --last 5m --style compact --predicate 'eventMessage CONTAINS "pam_ssh_agent"'
 ```
 
 A key must be both loaded in the current agent and present in the trusted file.
-Use `ssh-add ~/.ssh/id_ed25519` to load the selected key.
+Use `ssh-add <private-key-file>` to load the selected key.
 Enter the passphrase in the terminal if required.
 Never record the passphrase or private key.
 
@@ -101,33 +153,29 @@ Test fallback with an absent socket, an untrusted key, and a denied signing requ
 Confirm a fresh Touch ID or password authentication after each failure.
 The unprivileged PAM tests do not prove Apple's sudo can load the installed module.
 
-Inspect the generated configuration before activation. Confirm the module path is an immutable Nix store path, the
-strict option and timeout are present, and the selected key file contains only the fingerprint you approved. Keep the
+Inspect the generated configuration before activation. Confirm the module path is an immutable package path, the strict
+option and timeout are present, and the selected key file contains only the fingerprint you approved. Keep the
 existing `pam_reattach` line before this module and `pam_tid.so` after it. A successful trusted-key attempt should stop
 at the sufficient module; an absent socket, untrusted key, or denied signing request must continue to Apple's Touch ID
 and password fallback.
 
 ## Roll back
 
-Record the previous `/nix/var/nix/profiles/system-<number>-link` before activation.
-Use the installed `darwin-rebuild --switch-generation <number>` command after approval.
-Compare `/etc/pam.d/sudo_local` with the previous generation.
+Record the previous host configuration before activation. Use the host's documented rollback or previous-configuration
+command, then compare `/etc/pam.d/sudo_local` with the previous version.
 Confirm a fresh Touch ID or password authentication.
-Rebuild and activate the desired configuration when rollback validation is complete.
+Restore and activate the desired configuration when rollback validation is complete.
 
-Record the active generation and the result of `csrutil status` in the handoff. The xctrace command-line workflow for
-capturing per-request profiles is unverified because the Xcode documentation source gate was unavailable. The installed
-toolchain used for this work is Xcode 27.0 (27A266a) with macOS SDK 27.0. If profiling is needed, first capture a
-non-privileged baseline with the installed Instruments or xctrace tools and record the exact command and output before
-using it to guide changes.
+Record the active configuration identifier and the result of `csrutil status` in the deployment record. If profiling is
+needed, first capture a non-privileged baseline with the installed Instruments or `xctrace` tools and record the exact
+command and output before using it to guide changes.
 
 ## Source evidence
 
 Xcode DocumentationSearch did not return the OpenPAM declarations.
 The installed headers supply the constants and signatures:
 `MacOSX27.0.sdk/usr/include/security/pam_constants.h`, `pam_modules.h`, and `pam_appl.h`.
-The developer directory is `/Applications/Xcode.app/Contents/Developer`.
-The toolchain is Xcode 27.0 (27A266a), macOS SDK 27.0, arm64-apple-darwin.
+The developer directory and selected SDK are host-specific. Record their paths and versions with each build.
 [Apple XNU `kern_prot.c`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_prot.c)
 and [`kern_credential.c`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_credential.c)
 show that `setgroups(0, NULL)` disables the external group resolver and that the following `setgid` sets the only
@@ -136,20 +184,14 @@ shows that `id -G` uses `getgrouplist_2` for the current account. The SDK maps m
 extended symbol. [Apple Libc `getgroups.c`](https://github.com/apple-oss-distributions/Libc/blob/main/sys/getgroups.c)
 shows that this symbol also resolves the account group list. The root-only test dynamically resolves the unversioned
 `getgroups` symbol when it checks the stored child credential list on macOS.
-The live `/etc/pam.d/sudo` supplies the observed fallback order.
-On 2026-09-21, fresh Apple `/usr/bin/sudo -k` tests exercised the module built from public commit
-`19cb50be449ab507036ffc3c473186186e7516ab`. The trusted-key case returned UID 0 immediately. This result is an
-inference from the controlled failure cases because normal success logging is debug-level and no module-specific success
-event appeared in the unified log. Absent-socket, untrusted-key, and denied-signing tests returned UID 0 through the
-downstream Apple fallback.
-
-Rollback to generation 49 restored the earlier non-strict module and removed the hardening provenance while preserving
-the selected key and sudoers declaration. Reactivation installed generation 51 at
-`/nix/store/2jx7jjv8y92z2njsdcqczf0zaxw9wi96-darwin-system-26.11.15abb8c`. Its post-activation gate, fresh trusted-key
-test, missing-socket fallback test, and SIP check passed. Both generation commands applied PAM and `/etc` before existing
-Homebrew hook failures caused status 1.
 
 On 2026-09-22, the 200-sample benchmark reported policy-load p50 12.458 µs, p95 15.5 µs, and p99 24.5 µs. In-process
 authentication reported p50 60.292 µs, p95 68.458 µs, and p99 73.25 µs with one identity, and p50 60.667 µs, p95
 68.25 µs, and p99 76.417 µs with three decoys followed by the match. These measurements exclude Unix-socket IPC and
 hardware-backed user presence.
+
+The Enhanced Security settings were checked with Xcode DocumentationSearch on Xcode 27.2 (27B5019j), macOS SDK 27.2.
+The consulted Apple sources were [Enabling enhanced security for your app](https://developer.apple.com/documentation/xcode/enabling-enhanced-security-for-your-app),
+[Preparing your app to work with pointer authentication](https://developer.apple.com/documentation/security/preparing-your-app-to-work-with-pointer-authentication),
+and the Xcode build settings reference. The installed toolchain and SDK are the source of truth for the exact flags
+available on a host.

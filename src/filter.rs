@@ -82,9 +82,8 @@ impl IdentityFilter {
         calling_user: &str,
         mode: PolicyMode,
     ) -> Result<Self> {
-        let mut identities = Vec::new();
-        match from_file(authorized_keys_file, false, mode) {
-            Ok(keys) => identities.extend(keys),
+        let mut identities = match from_file(authorized_keys_file, false, mode) {
+            Ok(keys) => keys,
             Err(error)
                 if mode == PolicyMode::Legacy
                     && error
@@ -96,9 +95,10 @@ impl IdentityFilter {
                         "No valid keys for authentication, {authorized_keys_file:?} does not exist"
                     );
                 }
+                Vec::new()
             }
             Err(error) => return Err(error),
-        }
+        };
 
         if let Some(ca_keys_file) = ca_keys_file {
             identities.extend(from_file(ca_keys_file, true, mode)?);
@@ -108,16 +108,23 @@ impl IdentityFilter {
             let user = authorized_keys_command_user.unwrap_or(calling_user);
             identities.extend(from_command(cmd, get_uid(user)?, calling_user, mode)?);
         }
-        Self::from(identities, mode == PolicyMode::Strict)
+        Ok(Self::from(identities, mode == PolicyMode::Strict))
     }
 
     pub fn from_authorized_file(authorized_keys_file: &Path) -> Result<Self> {
         Self::new(authorized_keys_file, None, None, None, "")
     }
 
-    fn from(authorized: Vec<Authorized>, strict: bool) -> Result<Self> {
-        let mut keys: HashSet<KeyData> = HashSet::new();
-        let mut ca_keys: HashSet<KeyData> = HashSet::new();
+    fn from(authorized: Vec<Authorized>, strict: bool) -> Self {
+        let (key_count, ca_key_count) =
+            authorized
+                .iter()
+                .fold((0, 0), |(keys, ca_keys), item| match item {
+                    Authorized::Key(_) => (keys + 1, ca_keys),
+                    Authorized::CAKey(_) => (keys, ca_keys + 1),
+                });
+        let mut keys = HashSet::with_capacity(key_count);
+        let mut ca_keys = HashSet::with_capacity(ca_key_count);
 
         for item in authorized {
             match item {
@@ -126,11 +133,11 @@ impl IdentityFilter {
             };
         }
 
-        Ok(Self {
+        Self {
             keys,
             ca_keys,
             strict,
-        })
+        }
     }
 
     /// Returns true if the provided Identity is a PublicKey and this filter is configured
@@ -238,15 +245,15 @@ fn from_str_strict(buf: &str, what: &str, ca_keys: bool) -> Result<Vec<Authorize
     for (index, entry) in AuthorizedKeys::new(buf).enumerate() {
         let entry =
             entry.map_err(|error| anyhow!("Failed to parse line {what}:{index}: {error}"))?;
-        let options: Vec<_> = entry.config_opts().iter().collect();
-        let is_ca = ca_keys || options.as_slice() == ["cert-authority"];
-        if (!is_ca && !options.is_empty())
-            || (is_ca && !options.is_empty() && options.as_slice() != ["cert-authority"])
-        {
+        let mut options = entry.config_opts().iter();
+        let first_option = options.next();
+        let has_only_ca_option = first_option == Some("cert-authority") && options.next().is_none();
+        if first_option.is_some() && !has_only_ca_option {
             return Err(anyhow!(
                 "Unsupported authorized_keys options at {what}:{index}"
             ));
         }
+        let is_ca = ca_keys || has_only_ca_option;
         if authorized.len() >= MAX_POLICY_ENTRIES {
             return Err(anyhow!(
                 "Trusted-key policy exceeds {MAX_POLICY_ENTRIES} entries"
@@ -320,20 +327,24 @@ fn validate_components(path: &Path, required_uid: u32, allow_symlink: bool) -> R
             }
             continue;
         }
-        validate_mode(&current, &metadata)?;
+        validate_mode(&metadata)?;
     }
     Ok(())
 }
 
-fn validate_mode(path: &Path, metadata: &Metadata) -> Result<()> {
+fn validate_mode(metadata: &Metadata) -> Result<()> {
     let mode = metadata.mode();
     if mode & 0o022 == 0 {
         return Ok(());
     }
-    if path == Path::new("/nix/store") && mode & 0o1000 != 0 {
+    if is_allowed_sticky_directory(metadata.is_dir(), metadata.uid(), mode) {
         return Ok(());
     }
     Err(anyhow!("Trusted-key path is group- or world-writable"))
+}
+
+fn is_allowed_sticky_directory(is_directory: bool, uid: u32, mode: u32) -> bool {
+    is_directory && uid == 0 && mode & 0o1000 != 0
 }
 
 #[cfg(test)]
@@ -393,6 +404,8 @@ mod tests {
             1
         );
         assert!(from_str_strict(&format!("restrict {key}"), "test", false).is_err());
+        assert!(from_str_strict(&format!("cert-authority,restrict {key}"), "test", false).is_err());
+        assert!(from_str_strict(&format!("restrict {key}"), "test", true).is_err());
         assert!(from_str_strict(&format!("command=\"/bin/true\" {key}"), "test", false).is_err());
         assert!(from_str_strict("not a public key", "test", false).is_err());
         assert!(super::parse_policy(key, "test", false, PolicyMode::Strict).is_ok());
@@ -420,6 +433,14 @@ mod tests {
     fn strict_policy_requires_normalized_absolute_paths() {
         assert!(validate_trust_path(Path::new("relative"), 0).is_err());
         assert!(validate_trust_path(Path::new("/usr/bin/../bin/true"), 0).is_err());
+    }
+
+    #[test]
+    fn sticky_mode_exception_requires_root_owned_directory() {
+        assert!(super::is_allowed_sticky_directory(true, 0, 0o1777));
+        assert!(!super::is_allowed_sticky_directory(false, 0, 0o1777));
+        assert!(!super::is_allowed_sticky_directory(true, 501, 0o1777));
+        assert!(!super::is_allowed_sticky_directory(true, 0, 0o0777));
     }
 
     // this test needs to be run as root, as otherwise it would not be possible to

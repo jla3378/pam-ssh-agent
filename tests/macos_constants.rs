@@ -104,13 +104,14 @@ fn constants_match_installed_sdk() {
     }
     code.push_str("return 0; }\n");
     std::fs::write(&source, code).unwrap();
-    let compiler = if std::env::var_os("NIX_BUILD_TOP").is_some() {
-        "cc"
-    } else {
-        "xcrun"
-    };
-    let mut command = Command::new(compiler);
-    if compiler == "xcrun" {
+    let compiler = std::env::var_os("CC");
+    let use_xcrun = compiler.is_none();
+    let mut command = Command::new(
+        compiler
+            .as_deref()
+            .unwrap_or_else(|| std::ffi::OsStr::new("xcrun")),
+    );
+    if use_xcrun {
         command.arg("clang");
     }
     let result = command

@@ -2,9 +2,9 @@ use anyhow::anyhow;
 use log::{Level, Log, Metadata, Record};
 use std::cell::Cell;
 use std::env;
-use std::fmt::Display;
+use std::fmt::{Display, Write as _};
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use syslog::{Facility, Formatter3164, LogFormat, Logger, LoggerBackend, Severity};
 
 static LOG_LOCK: Mutex<bool> = Mutex::new(false);
@@ -16,7 +16,7 @@ thread_local! {
 /// macros are sent to the local syslog, prefixed in a way that matches how logging
 /// was done in pam_ssh_agent_auth. If this method is called multiple times, subsequent
 /// calls will not have any effect.
-pub fn init_logging(pam_service: String) -> anyhow::Result<()> {
+pub fn init_logging(pam_service: &str) -> anyhow::Result<()> {
     let mut guard = LOG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     if *guard {
         // we have already initialized logging
@@ -29,8 +29,8 @@ pub fn init_logging(pam_service: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_impl(pam_service: String) -> anyhow::Result<()> {
-    let logger = syslog::unix(PrefixFormatter::new(Facility::LOG_AUTHPRIV, &pam_service))
+fn init_impl(pam_service: &str) -> anyhow::Result<()> {
+    let logger = syslog::unix(PrefixFormatter::new(Facility::LOG_AUTHPRIV, pam_service))
         .map_err(|e| anyhow!("Failed to set up log: {}", e.description()))?;
     log::set_boxed_logger(Box::new(PrefixWrappingLogger::new(logger)))?;
     log::set_max_level(log::LevelFilter::Debug);
@@ -59,7 +59,7 @@ impl<T: Display> LogFormat<T> for PrefixFormatter {
     fn format<W: Write>(&self, w: &mut W, severity: Severity, message: T) -> syslog::Result<()> {
         let message = escape_log_value(&message.to_string());
         self.inner
-            .format(w, severity, format!("{}{}", self.prefix, message))
+            .format(w, severity, format_args!("{}{}", self.prefix, message))
     }
 }
 
@@ -68,7 +68,7 @@ impl PrefixFormatter {
         let inner = Formatter3164 {
             facility,
             hostname: None,
-            process: process_name().unwrap_or("unknown".into()),
+            process: process_name().unwrap_or_else(|_| "unknown".into()),
             pid: std::process::id(),
         };
         PrefixFormatter {
@@ -79,23 +79,27 @@ impl PrefixFormatter {
 }
 
 pub(crate) fn escape_log_value(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\\' => "\\\\".to_owned(),
-            '\n' => "\\n".to_owned(),
-            '\r' => "\\r".to_owned(),
-            '\t' => "\\t".to_owned(),
-            character if character.is_control() => format!("\\u{{{:x}}}", character as u32),
-            character => character.to_string(),
-        })
-        .collect()
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                write!(&mut escaped, "\\u{{{:x}}}", character as u32)
+                    .expect("writing to a String cannot fail");
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 pub fn process_name() -> anyhow::Result<String> {
     Ok(env::current_exe()?
         .file_name()
-        .ok_or(anyhow!("no filename"))?
+        .ok_or_else(|| anyhow!("no filename"))?
         .to_string_lossy()
         .into())
 }
@@ -103,13 +107,13 @@ pub fn process_name() -> anyhow::Result<String> {
 // PrefixWrappingLogger is a copy of syslog::BasicLogger with the formatter type PrefixFormatter.
 // It would be nice to contribute a Log implementation that could hold any Logger
 struct PrefixWrappingLogger {
-    logger: Arc<Mutex<Logger<LoggerBackend, PrefixFormatter>>>,
+    logger: Mutex<Logger<LoggerBackend, PrefixFormatter>>,
 }
 
 impl PrefixWrappingLogger {
     fn new(logger: Logger<LoggerBackend, PrefixFormatter>) -> Self {
         PrefixWrappingLogger {
-            logger: Arc::new(Mutex::new(logger)),
+            logger: Mutex::new(logger),
         }
     }
 }

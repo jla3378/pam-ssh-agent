@@ -21,28 +21,29 @@ pub fn authenticate(
     mut agent: impl SSHAgent,
     principal: &str,
 ) -> Result<bool> {
+    let strict = filter.strict();
     let now = SystemTime::now();
     for identity in agent.list_identities()? {
-        if filter.filter(&identity) {
-            if let Certificate(cert) = &identity
-                && !validate_cert(cert, now, principal)
+        if !filter.filter(&identity) {
+            continue;
+        }
+        if let Certificate(cert) = &identity
+            && !validate_cert(cert, now, principal)
+        {
+            info!("Cert not valid, skipping");
+            continue;
+        }
+        match sign_and_verify(identity, &mut agent, strict) {
+            Ok(result) => return Ok(result),
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<SACError>(),
+                    Some(SACError::RemoteFailure)
+                ) =>
             {
-                info!("Cert not valid, skipping");
-                continue;
+                debug!("SSHAgent: RemoteFailure; trying next key");
             }
-            // Allow sign_and_verify() to return RemoteFailure (key not loaded / present),
-            // and try the next configured key
-            match sign_and_verify(identity, &mut agent, filter.strict()) {
-                Ok(res) => return Ok(res),
-                Err(e) => {
-                    if let Some(SACError::RemoteFailure) = e.downcast_ref::<SACError>() {
-                        debug!("SSHAgent: RemoteFailure; trying next key");
-                        continue;
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
+            Err(error) => return Err(error),
         }
     }
     Ok(false)
@@ -59,10 +60,11 @@ fn sign_and_verify(
     if strict {
         validate_sk_signature(&identity, &sig)?;
     }
-    match identity {
-        PublicKey(key) => verify(key.key_data(), &data, &sig)?,
-        Certificate(cert) => verify(cert.public_key(), &data, &sig)?,
+    let key = match &identity {
+        PublicKey(key) => key.key_data(),
+        Certificate(cert) => cert.public_key(),
     };
+    verify(key, &data, &sig)?;
     Ok(true)
 }
 
@@ -81,10 +83,11 @@ fn validate_sk_signature(identity: &Identity, signature: &Signature) -> Result<(
     let Some(expected) = expected else {
         return Ok(());
     };
-    if signature.algorithm() != expected || signature.as_bytes().len() < 5 {
+    let bytes = signature.as_bytes();
+    if signature.algorithm() != expected || bytes.len() < 5 {
         return Err(anyhow!("Invalid security-key signature format"));
     }
-    let flags = signature.as_bytes()[signature.as_bytes().len() - 5];
+    let flags = bytes[bytes.len() - 5];
     if flags & 0x01 == 0 || flags & 0x04 == 0 {
         return Err(anyhow!(
             "Security-key signature requires user presence and verification"
@@ -101,10 +104,8 @@ fn validate_cert(cert: &ssh_key::Certificate, when: SystemTime, principal: &str)
         return false;
     };
 
-    if let Err(e) = cert.validate_at(
-        seconds_since_epoch.as_secs(),
-        vec![&ca_key.fingerprint(HashAlg::Sha256)],
-    ) {
+    let ca_fingerprint = ca_key.fingerprint(HashAlg::Sha256);
+    if let Err(e) = cert.validate_at(seconds_since_epoch.as_secs(), [&ca_fingerprint]) {
         info!("Certificate validation failed: {e:?}");
         return false;
     }

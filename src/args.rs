@@ -72,11 +72,9 @@ impl Args {
                     }
                     let any = expand_vars(any.to_string(), env, handle)?;
 
-                    let parts: Vec<&str> = any.splitn(2, '=').collect();
-                    if parts.len() != 2 {
-                        return Err(anyhow!("Could not split '{any}' using '='"));
-                    }
-                    let (key, value) = (parts[0], parts[1]);
+                    let (key, value) = any
+                        .split_once('=')
+                        .ok_or_else(|| anyhow!("Could not split '{any}' using '='"))?;
                     match key {
                         "file" => file = value.into(),
                         "default_ssh_auth_sock" => default_ssh_auth_sock = Some(value.into()),
@@ -223,6 +221,18 @@ mod test {
             )?
         );
         let expected = Args {
+            default_ssh_auth_sock: Some("/var/run/ssh=agent.sock".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            expected,
+            Args::parse(
+                args!("default_ssh_auth_sock=/var/run/ssh=agent.sock").refs(),
+                &DummyEnv,
+                &DummyHandle
+            )?
+        );
+        let expected = Args {
             authorized_keys_command: Some("/usr/bin/sss_ssh_authorizedkeys".into()),
             authorized_keys_command_user: Some("nobody".into()),
             ..Default::default()
@@ -269,11 +279,11 @@ mod test {
             )
             .refs(),
             &DummyEnv,
-            &CannedHandler::new(vec!["jla"]),
+            &CannedHandler::new(vec!["fixture-user"]),
         )?;
         assert!(strict.strict);
         assert!(!strict.sshd_shortcut);
-        assert_eq!(strict.file, "/etc/security/pam-ssh-agent/jla");
+        assert_eq!(strict.file, "/etc/security/pam-ssh-agent/fixture-user");
         assert_eq!(strict.agent_timeout, Some(Duration::from_secs(12)));
 
         let strict_with_sshd = Args::parse(
@@ -284,7 +294,7 @@ mod test {
             )
             .refs(),
             &DummyEnv,
-            &CannedHandler::new(vec!["jla"]),
+            &CannedHandler::new(vec!["fixture-user"]),
         )?;
         assert!(strict_with_sshd.sshd_shortcut);
 
@@ -314,7 +324,7 @@ mod test {
             let error = Args::parse(
                 args!("strict", "file=/etc/security/pam-ssh-agent/%u", command).refs(),
                 &DummyEnv,
-                &CannedHandler::new(vec!["jla"]),
+                &CannedHandler::new(vec!["fixture-user"]),
             )
             .unwrap_err();
             assert!(error.to_string().contains("expanded helper paths"));
@@ -328,7 +338,7 @@ mod test {
                 Args::parse(
                     args!("strict", "file=/etc/security/pam-ssh-agent/%u", argument).refs(),
                     &DummyEnv,
-                    &CannedHandler::new(vec!["jla"]),
+                    &CannedHandler::new(vec!["fixture-user"]),
                 )
                 .is_err()
             );
